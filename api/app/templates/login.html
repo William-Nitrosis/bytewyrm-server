@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<div style="max-width: 520px; margin: 3rem auto;">
+    <div class="panel">
+        <div class="page-kicker">ByteWyrm</div><h1 style="margin:.15rem 0 .35rem;">Enter the Hoard</h1>
+        <p class="muted">Enter the admin bearer token from your <code>.env</code> file to access the private ByteWyrm dashboard.</p>
+        <form class="stacked" method="post" action="/login">
+            <input type="hidden" name="next_path" value="{{ next }}">
+            <div>
+                <label for="admin_token">Admin token</label>
+                <input id="admin_token" name="admin_token" type="password" autocomplete="current-password" required>
+            </div>
+            <button type="submit">Enter dashboard</button>
+        </form>
+        <p class="muted" style="margin-top:1rem;">Tip: docs remain at <code>/docs</code> for the JSON admin API.</p>
+    </div>
+</div>
+{% endblock %}

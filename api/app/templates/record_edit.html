@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block content %}
+<div style="max-width: 900px; margin: 0 auto;">
+    <div class="muted small"><a href="/dashboard/projects/{{ project.id }}">← Back to {{ project.name }}</a></div>
+    <h1 style="margin-bottom:.3rem;">Edit Store record #{{ record.id }}</h1>
+    <div class="muted" style="margin-bottom:1rem;">
+        Created {{ record.created_at }} by {{ record.created_by.client_name or record.created_by.key_name }}
+        <span class="mono small">({{ record.created_by.key_prefix }}...)</span>.
+        Editing keeps this audit metadata unchanged.
+    </div>
+
+    <div class="panel">
+        <form class="stacked" method="post" action="/dashboard/projects/{{ project.id }}/store/records/{{ record.id }}/edit">
+            {% for field in schema_fields %}
+            {% set present = field.name in record.data %}
+            {% set current = record.data.get(field.name) %}
+            <div class="card" style="background: rgba(2,6,23,.28);">
+                <div class="split">
+                    <label for="edit_{{ field.name }}" style="margin:0;">{{ field.name }} <span class="muted small">({{ field.type }})</span></label>
+                    {% if not field.required %}
+                        <label class="checkbox-row small" style="margin:0;"><input type="checkbox" name="include__{{ field.name }}" {% if present %}checked{% endif %}> Include optional field</label>
+                    {% endif %}
+                </div>
+                <div style="margin-top:.55rem;">
+                    {% if field.type == 'integer' %}
+                        <input id="edit_{{ field.name }}" name="value__{{ field.name }}" type="number" step="1" value="{{ current if present else '' }}" {% if field.min is not none %}min="{{ field.min }}"{% endif %} {% if field.max is not none %}max="{{ field.max }}"{% endif %} {% if field.required %}required{% endif %}>
+                    {% elif field.type == 'float' %}
+                        <input id="edit_{{ field.name }}" name="value__{{ field.name }}" type="number" step="any" value="{{ current if present else '' }}" {% if field.min is not none %}min="{{ field.min }}"{% endif %} {% if field.max is not none %}max="{{ field.max }}"{% endif %} {% if field.required %}required{% endif %}>
+                    {% elif field.type == 'boolean' %}
+                        <label class="checkbox-row"><input id="edit_{{ field.name }}" name="value__{{ field.name }}" type="checkbox" {% if present and current %}checked{% endif %}> True</label>
+                    {% else %}
+                        <input id="edit_{{ field.name }}" name="value__{{ field.name }}" type="text" value="{{ current if present else '' }}" {% if field.min_length is not none %}minlength="{{ field.min_length }}"{% endif %} {% if field.max_length is not none %}maxlength="{{ field.max_length }}"{% endif %} {% if field.required %}required{% endif %}>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+            <div class="actions">
+                <button type="submit">Save Store record</button>
+                <a href="/dashboard/projects/{{ project.id }}"><button class="secondary" type="button">Cancel</button></a>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,404 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="split" style="margin-bottom: 1rem;">
+    <div>
+        <div class="muted small"><a href="/dashboard">← Back to dashboard</a></div>
+        <div class="page-kicker">Project</div><h1 style="margin: .15rem 0 .3rem;">{{ project.name }}</h1>
+        <div class="muted mono">{{ project.id }}</div>
+    </div>
+    <div>
+        {% if project.enabled %}
+            <span class="pill good">● Active</span>
+        {% else %}
+            <span class="pill bad">● Disabled</span>
+        {% endif %}
+    </div>
+</div>
+
+<div class="cards" style="margin-bottom: 1rem;">
+    <div class="card"><div class="subtle">Store fields</div><div class="stat">{{ project.tools.store.field_count }}</div></div>
+    <div class="card"><div class="subtle">Store records</div><div class="stat">{{ project.tools.store.record_count }}</div><div class="small muted">of {{ project.tools.store.max_records }}</div></div>
+    <div class="card"><div class="subtle">Store mode</div><div class="stat" style="font-size:1.2rem;">{{ project.tools.store.record_mode.replace('_', ' ')|title }}</div><div class="small muted">{% if project.tools.store.key_field %}key: {{ project.tools.store.key_field }}{% else %}new row per write{% endif %}</div></div>
+    <div class="card"><div class="subtle">API keys</div><div class="stat">{{ project['keys']['total'] }}</div><div class="small muted">{{ project['keys']['enabled'] }} enabled</div></div>
+    <div class="card"><div class="subtle">Traffic this minute</div><div class="stat">{{ project.usage.requests }}</div><div class="small muted">R{{ project.usage.reads }} · W{{ project.usage.writes }}</div></div>
+    <div class="card"><div class="subtle">Request limit</div><div class="stat">{{ project.limits.max_request_bytes }}</div><div class="small muted">bytes</div></div>
+    <div class="card"><div class="subtle">Rate limit</div><div class="stat">R{{ project.limits.read_rate_limit }}</div><div class="small muted">W{{ project.limits.write_rate_limit }} per minute</div></div>
+</div>
+
+<div class="grid grid-2">
+    <section class="panel">
+        <h2>Settings</h2>
+        <form class="stacked" method="post" action="/dashboard/projects/{{ project.id }}/settings">
+            <div>
+                <label for="name">Name</label>
+                <input id="name" name="name" maxlength="80" value="{{ project.name }}" required>
+            </div>
+            <div class="grid grid-2">
+                <div>
+                    <label for="max_records">Store record cap</label>
+                    <input id="max_records" name="store_max_records" type="number" min="1" max="100000" value="{{ project.tools.store.max_records }}" required>
+                </div>
+                <div>
+                    <label for="store_overflow_policy">When Store is full</label>
+                    <select id="store_overflow_policy" name="store_overflow_policy">
+                        <option value="reject" {% if project.tools.store.overflow_policy == 'reject' %}selected{% endif %}>Reject new records</option>
+                        <option value="delete_oldest" {% if project.tools.store.overflow_policy == 'delete_oldest' %}selected{% endif %}>Delete oldest record</option>
+                    </select>
+                </div>
+            </div>
+            <div class="card" style="background: rgba(2,6,23,.28);">
+                <div class="split">
+                    <div>
+                        <strong>Store record behaviour</strong>
+                        <div class="muted small">Append every write, or use one field to identify a record that ByteWyrm should update.</div>
+                    </div>
+                    {% if not project.tools.store.schema_editable %}<span class="pill bad">Mode locked</span>{% endif %}
+                </div>
+                <div class="grid grid-2" style="margin-top:.8rem;">
+                    <div>
+                        <label for="store_record_mode">Record mode</label>
+                        <select id="store_record_mode" name="store_record_mode">
+                            <option value="append" {% if project.tools.store.record_mode == 'append' %}selected{% endif %}>Append every record</option>
+                            <option value="replace_latest" {% if project.tools.store.record_mode == 'replace_latest' %}selected{% endif %}>Keyed — replace latest</option>
+                            <option value="keep_highest" {% if project.tools.store.record_mode == 'keep_highest' %}selected{% endif %}>Keyed — keep highest</option>
+                            <option value="keep_lowest" {% if project.tools.store.record_mode == 'keep_lowest' %}selected{% endif %}>Keyed — keep lowest</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label for="store_key_field">Key field</label>
+                        <select id="store_key_field" name="store_key_field">
+                            <option value="">None</option>
+                            {% for field in schema_fields %}
+                                {% if field.required and field.type in ['text', 'integer', 'boolean'] %}
+                                    <option value="{{ field.name }}" {% if project.tools.store.key_field == field.name %}selected{% endif %}>{{ field.name }} ({{ field.type }})</option>
+                                {% endif %}
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+                <div class="grid grid-2" style="margin-top:.8rem;">
+                    <div>
+                        <label for="store_compare_field">Compare field <span class="muted small">(highest/lowest)</span></label>
+                        <select id="store_compare_field" name="store_compare_field">
+                            <option value="">None</option>
+                            {% for field in schema_fields %}
+                                {% if field.required and field.type in ['integer', 'float'] %}
+                                    <option value="{{ field.name }}" {% if project.tools.store.compare_field == field.name %}selected{% endif %}>{{ field.name }} ({{ field.type }})</option>
+                                {% endif %}
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div>
+                        <label for="store_read_scope">Student read access</label>
+                        <select id="store_read_scope" name="store_read_scope">
+                            <option value="project" {% if project.tools.store.read_scope == 'project' %}selected{% endif %}>All Project Store records</option>
+                            <option value="own_key" {% if project.tools.store.read_scope == 'own_key' %}selected{% endif %}>Only records created by their API key</option>
+                        </select>
+                    </div>
+                </div>
+                <label class="checkbox-row" style="margin-top:.8rem;">
+                    <input type="checkbox" name="store_owner_only" {% if project.tools.store.creator_only_updates %}checked{% endif %}>
+                    Only the API key that created a keyed record may update it
+                </label>
+                <div class="muted small" style="margin-top:.55rem; line-height:1.45;">
+                    Key and compare fields must be required. Key fields can be text, integer or boolean. Highest/lowest comparison fields must be integer or float. Mode/key fields can only change while the Store is empty.
+                </div>
+            </div>
+            <div>
+                <label for="max_request_bytes">Max request bytes</label>
+                <input id="max_request_bytes" name="max_request_bytes" type="number" min="128" max="2048" value="{{ project.limits.max_request_bytes }}" required>
+            </div>
+            <div class="grid grid-2">
+                <div>
+                    <label for="read_rate_limit">Read rate / minute</label>
+                    <input id="read_rate_limit" name="read_rate_limit" type="number" min="1" max="10000" value="{{ project.limits.read_rate_limit }}" required>
+                </div>
+                <div>
+                    <label for="write_rate_limit">Write rate / minute</label>
+                    <input id="write_rate_limit" name="write_rate_limit" type="number" min="1" max="10000" value="{{ project.limits.write_rate_limit }}" required>
+                </div>
+            </div>
+            <label class="checkbox-row"><input type="checkbox" name="enabled" {% if project.enabled %}checked{% endif %}> Enabled</label>
+            <div class="actions">
+                <button type="submit">Save settings</button>
+            </div>
+        </form>
+        <hr style="border-color: var(--border); border-style: solid; border-width: 1px 0 0; margin: 1rem 0;">
+        <form method="post" action="/dashboard/projects/{{ project.id }}/delete" onsubmit="return confirm('Delete this project and all of its data?');">
+            <button class="danger" type="submit">Delete project</button>
+        </form>
+    </section>
+
+    <section class="panel">
+        <div class="split">
+            <div><span class="tool-badge">Store</span><h2 style="margin-top:.55rem;">Schema</h2></div>
+            {% if project.tools.store.schema_editable %}
+                <span class="pill neutral">Editable</span>
+            {% else %}
+                <span class="pill bad">Locked</span>
+            {% endif %}
+        </div>
+        {% if not project.tools.store.schema_editable %}
+            <div class="notice warning">The Store schema is locked because Store records exist. Clear the Store to edit its schema.</div>
+        {% endif %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Field</th>
+                    <th>Type</th>
+                    <th>Constraints</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for field in schema_fields %}
+                <tr>
+                    <td><strong>{{ field.name }}</strong><div class="muted small">{% if field.required %}required{% else %}optional{% endif %}</div></td>
+                    <td>{{ field.type }}</td>
+                    <td class="small">
+                        {% if field.type == 'integer' %}min={{ field.min }} · max={{ field.max }}{% endif %}
+                        {% if field.type == 'float' %}min={{ field.min }} · max={{ field.max }}{% endif %}
+                        {% if field.type == 'text' %}min_length={{ field.min_length }} · max_length={{ field.max_length }}{% endif %}
+                        {% if field.type == 'boolean' %}boolean{% endif %}
+                    </td>
+                    <td class="nowrap">
+                        {% if project.tools.store.schema_editable %}
+                            <form class="inline" method="post" action="/dashboard/projects/{{ project.id }}/store/fields/{{ field.name }}/delete" onsubmit="return confirm('Remove field {{ field.name }}?');">
+                                <button class="secondary" type="submit">Remove</button>
+                            </form>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% else %}
+                <tr><td colspan="4" class="muted">No fields yet.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% if project.tools.store.schema_editable %}
+        <hr style="border-color: var(--border); border-style: solid; border-width: 1px 0 0; margin: 1rem 0;">
+        <h3>Add field</h3>
+        <form class="stacked" method="post" action="/dashboard/projects/{{ project.id }}/store/fields">
+            <div class="grid grid-2">
+                <div>
+                    <label for="field_name">Name</label>
+                    <input id="field_name" name="name" placeholder="score" maxlength="32" required>
+                </div>
+                <div>
+                    <label for="field_type">Type</label>
+                    <select id="field_type" name="field_type">
+                        <option value="text">text</option>
+                        <option value="integer">integer</option>
+                        <option value="float">float</option>
+                        <option value="boolean">boolean</option>
+                    </select>
+                </div>
+            </div>
+            <label class="checkbox-row"><input type="checkbox" name="required" checked> Required</label>
+            <div class="grid grid-2">
+                <div>
+                    <label>Integer min</label>
+                    <input name="integer_min" placeholder="0">
+                </div>
+                <div>
+                    <label>Integer max</label>
+                    <input name="integer_max" placeholder="100000000">
+                </div>
+            </div>
+            <div class="grid grid-2">
+                <div>
+                    <label>Float min</label>
+                    <input name="float_min" placeholder="0">
+                </div>
+                <div>
+                    <label>Float max</label>
+                    <input name="float_max" placeholder="100">
+                </div>
+            </div>
+            <div class="grid grid-2">
+                <div>
+                    <label>Text min length</label>
+                    <input name="text_min_length" placeholder="1">
+                </div>
+                <div>
+                    <label>Text max length</label>
+                    <input name="text_max_length" placeholder="128">
+                </div>
+            </div>
+            <button type="submit">Add field</button>
+            <div class="muted small">Only fill the constraint inputs relevant to the chosen field type.</div>
+        </form>
+        {% endif %}
+    </section>
+</div>
+
+<div class="grid grid-2" style="margin-top: 1rem;">
+    <section class="panel">
+        <h2>API keys</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Prefix</th>
+                    <th>Permissions</th>
+                    <th>Now</th>
+                    <th>5 min avg</th>
+                    <th>Totals</th>
+                    <th>Rejected</th>
+                    <th>Last used</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for key in keys %}
+                <tr>
+                    <td>
+                        <strong>{{ key.name }}</strong>
+                        <div class="muted small">{{ key.client_name or 'No client name' }}</div>
+                        {% if key.enabled %}
+                            <div class="pill good" style="margin-top:.35rem;">Enabled</div>
+                        {% else %}
+                            <div class="pill bad" style="margin-top:.35rem;">Revoked</div>
+                        {% endif %}
+                    </td>
+                    <td class="mono small">{{ key.key_prefix }}...</td>
+                    <td>{% if key.can_read %}R{% endif %}{% if key.can_write %}W{% endif %}</td>
+                    <td class="small nowrap">R{{ key.usage.current_minute.reads }} / W{{ key.usage.current_minute.writes }}</td>
+                    <td class="small nowrap">{{ key.usage.five_minute_average.requests_per_minute }} req/min</td>
+                    <td class="small nowrap">R{{ key.usage.totals.reads }} / W{{ key.usage.totals.writes }}</td>
+                    <td class="small">{{ key.usage.totals.rejected }}{% if key.usage.totals.rate_limited %} <span class="muted">({{ key.usage.totals.rate_limited }} rate-limited)</span>{% endif %}</td>
+                    <td class="small">{{ key.usage.last_request_at or key.last_used_at or 'Never' }}</td>
+                    <td class="nowrap">
+                        {% if key.enabled %}
+                        <form class="inline" method="post" action="/dashboard/projects/{{ project.id }}/keys/{{ key.id }}/revoke">
+                            <button class="secondary" type="submit">Revoke</button>
+                        </form>
+                        {% else %}
+                        <form class="inline" method="post" action="/dashboard/projects/{{ project.id }}/keys/{{ key.id }}/enable">
+                            <button class="secondary" type="submit">Enable</button>
+                        </form>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% else %}
+                <tr><td colspan="9" class="muted">No API keys yet.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        <hr style="border-color: var(--border); border-style: solid; border-width: 1px 0 0; margin: 1rem 0;">
+        <h3>Create API key</h3>
+        <form class="stacked" method="post" action="/dashboard/projects/{{ project.id }}/keys">
+            <div>
+                <label for="key_name">Name</label>
+                <input id="key_name" name="name" maxlength="80" placeholder="Drake key" required>
+            </div>
+            <div>
+                <label for="client_name">Client / student name (optional)</label>
+                <input id="client_name" name="client_name" maxlength="80" placeholder="Drake">
+            </div>
+            <div>
+                <label for="permissions">Permissions</label>
+                <select id="permissions" name="permissions">
+                    <option value="rw">Read + write</option>
+                    <option value="r">Read only</option>
+                    <option value="w">Write only</option>
+                </select>
+            </div>
+            <button type="submit">Generate key</button>
+        </form>
+    </section>
+
+    <section class="panel">
+        <div class="split">
+            <div><span class="tool-badge">Store</span><h2 style="margin-top:.55rem;">Records</h2></div>
+            <form class="inline" method="post" action="/dashboard/projects/{{ project.id }}/store/records/clear" onsubmit="return confirm('Clear all Store records from this project?');">
+                <button class="danger" type="submit">Clear Store</button>
+            </form>
+        </div>
+        <div class="muted small" style="margin-bottom:.6rem;">Showing up to the latest 100 records. When full: <strong>{% if project.tools.store.overflow_policy == 'delete_oldest' %}delete oldest{% else %}reject new records{% endif %}</strong>.</div>
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    {% for field in schema_fields %}<th>{{ field.name }}</th>{% endfor %}
+                    <th>Created by</th>
+                    <th>Created at</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for record in records %}
+                <tr>
+                    <td>{{ record.id }}</td>
+                    {% for field in schema_fields %}
+                        <td class="small">{{ record.data.get(field.name, '') }}</td>
+                    {% endfor %}
+                    <td class="small">
+                        {{ record.created_by.client_name or record.created_by.key_name }}
+                        <div class="muted">{{ record.created_by.key_prefix }}</div>
+                    </td>
+                    <td class="small">{{ record.created_at }}</td>
+                    <td class="nowrap">
+                        <a href="/dashboard/projects/{{ project.id }}/store/records/{{ record.id }}/edit"><button class="secondary" type="button">Edit</button></a>
+                        <form class="inline" method="post" action="/dashboard/projects/{{ project.id }}/store/records/{{ record.id }}/delete" onsubmit="return confirm('Delete record #{{ record.id }}?');">
+                            <button class="secondary" type="submit">Delete</button>
+                        </form>
+                    </td>
+                </tr>
+            {% else %}
+                <tr><td colspan="99" class="muted">No Store records yet.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        <div class="actions" style="margin-top:.8rem;">
+            {% if store_page.before_id %}
+                <a href="/dashboard/projects/{{ project.id }}"><button class="secondary" type="button">Newest records</button></a>
+            {% endif %}
+            {% if store_page.has_more and store_page.next_before_id %}
+                <a href="/dashboard/projects/{{ project.id }}?store_before_id={{ store_page.next_before_id }}"><button class="secondary" type="button">Older records →</button></a>
+            {% endif %}
+        </div>
+
+        <hr style="border-color: var(--border); border-style: solid; border-width: 1px 0 0; margin: 1rem 0;">
+        <h3>Add Store record manually</h3>
+        {% if not schema_fields %}
+            <div class="notice warning">Define the Store schema before adding records.</div>
+        {% elif not write_keys %}
+            <div class="notice warning">Create or enable a write-capable API key first. Manual Store records are attributed to a key so the existing audit model remains intact.</div>
+        {% else %}
+        <form class="stacked" method="post" action="/dashboard/projects/{{ project.id }}/store/records/new">
+            <div>
+                <label for="creator_key_id">Attribute Store record to</label>
+                <select id="creator_key_id" name="creator_key_id" required>
+                    {% for key in write_keys %}
+                        <option value="{{ key.id }}">{{ key.client_name or key.name }} — {{ key.name }} ({{ key.key_prefix }}...)</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            {% for field in schema_fields %}
+            <div class="card" style="background: rgba(2,6,23,.28);">
+                <div class="split">
+                    <label for="new_{{ field.name }}" style="margin:0;">{{ field.name }} <span class="muted small">({{ field.type }})</span></label>
+                    {% if not field.required %}
+                        <label class="checkbox-row small" style="margin:0;"><input type="checkbox" name="include__{{ field.name }}"> Include optional field</label>
+                    {% endif %}
+                </div>
+                <div style="margin-top:.55rem;">
+                    {% if field.type == 'integer' %}
+                        <input id="new_{{ field.name }}" name="value__{{ field.name }}" type="number" step="1" {% if field.min is not none %}min="{{ field.min }}"{% endif %} {% if field.max is not none %}max="{{ field.max }}"{% endif %} {% if field.required %}required{% endif %}>
+                    {% elif field.type == 'float' %}
+                        <input id="new_{{ field.name }}" name="value__{{ field.name }}" type="number" step="any" {% if field.min is not none %}min="{{ field.min }}"{% endif %} {% if field.max is not none %}max="{{ field.max }}"{% endif %} {% if field.required %}required{% endif %}>
+                    {% elif field.type == 'boolean' %}
+                        <label class="checkbox-row"><input id="new_{{ field.name }}" name="value__{{ field.name }}" type="checkbox"> True</label>
+                    {% else %}
+                        <input id="new_{{ field.name }}" name="value__{{ field.name }}" type="text" {% if field.min_length is not none %}minlength="{{ field.min_length }}"{% endif %} {% if field.max_length is not none %}maxlength="{{ field.max_length }}"{% endif %} {% if field.required %}required{% endif %}>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+            <button type="submit">Add Store record</button>
+        </form>
+        {% endif %}
+    </section>
+</div>
+{% endblock %}

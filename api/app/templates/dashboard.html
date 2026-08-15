@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="split" style="margin-bottom: 1rem;">
+    <div>
+        <div class="page-kicker">The Hoard</div><h1 style="margin: .15rem 0 .3rem;">Projects</h1>
+        <div class="muted">Manage ByteWyrm projects, tools, API keys and limits from one place.</div>
+    </div>
+</div>
+
+<div class="cards" style="margin-bottom: 1rem;">
+    <div class="card"><div class="subtle">Projects</div><div class="stat">{{ stats.projects }}</div><div class="small muted">{{ stats.enabled_projects }} enabled</div></div>
+    <div class="card"><div class="subtle">Store fields</div><div class="stat">{{ stats.store_fields }}</div><div class="small muted">Across all Project Stores</div></div>
+    <div class="card"><div class="subtle">Store records</div><div class="stat">{{ stats.store_records }}</div><div class="small muted">Stored in Project Stores</div></div>
+    <div class="card"><div class="subtle">API Keys</div><div class="stat">{{ stats['keys'] }}</div><div class="small muted">{{ stats.enabled_keys }} enabled</div></div>
+    <div class="card"><div class="subtle">Traffic this minute</div><div class="stat">{{ stats.current_traffic.requests }}</div><div class="small muted">R{{ stats.current_traffic.reads }} · W{{ stats.current_traffic.writes }} · {{ stats.current_traffic.rejected }} rejected</div></div>
+    <div class="card">
+        <div class="subtle">Database used</div>
+        <div class="stat">{{ human_bytes(stats.database.used_bytes) }}</div>
+        <div class="small muted">{{ human_bytes(stats.database.reusable_bytes) }} reusable · {{ human_bytes(stats.database.allocated_bytes) }} allocated</div>
+    </div>
+</div>
+
+<div class="grid grid-2 dashboard-main">
+    <section class="panel">
+        <div class="split"><h2>Projects</h2><span class="muted">{{ projects|length }} total</span></div>
+        <div class="container-list">
+            {% for project in projects %}
+                <div class="card container-card">
+                    <div>
+                        <div class="split">
+                            <div>
+                                <a href="/dashboard/projects/{{ project.id }}"><strong>{{ project.name }}</strong></a>
+                                <div class="muted small mono">{{ project.id }}</div>
+                            </div>
+                            {% if project.enabled %}
+                                <span class="pill good">● Active</span>
+                            {% else %}
+                                <span class="pill bad">● Disabled</span>
+                            {% endif %}
+                        </div>
+                        <div class="container-meta">
+                            <span><span class="tool-badge">Store</span> {{ project.tools.store.field_count }} fields</span>
+                            <span>{{ project.tools.store.record_count }} / {{ project.tools.store.max_records }} records</span>
+                            <span>{% if project.tools.store.overflow_policy == 'delete_oldest' %}rolling Store{% else %}reject when full{% endif %}</span>
+                            <span>{{ project.tools.store.record_mode.replace('_', ' ') }}</span>
+                            <span>{% if project.tools.store.read_scope == 'own_key' %}per-key reads{% else %}shared reads{% endif %}</span>
+                            <span>{{ project['keys']['enabled'] }} / {{ project['keys']['total'] }} keys enabled</span>
+                            <span>Now R{{ project.usage.reads }} / W{{ project.usage.writes }}</span>
+                        </div>
+                    </div>
+                    <div class="actions">
+                        <a href="/dashboard/projects/{{ project.id }}"><button type="button">Open</button></a>
+                    </div>
+                </div>
+            {% else %}
+                <div class="card">
+                    <strong>No projects yet.</strong>
+                    <div class="muted small">Create your first project using the form on the right.</div>
+                </div>
+            {% endfor %}
+        </div>
+    </section>
+
+    <aside class="panel">
+        <h2>Create project</h2><p class="muted small">Every project currently includes the Store tool. More ByteWyrm tools can slot in later.</p>
+        <form class="stacked" method="post" action="/dashboard/projects">
+            <div>
+                <label for="name">Name</label>
+                <input id="name" name="name" required maxlength="80" placeholder="Test Asteroids">
+            </div>
+            <div class="grid grid-2">
+                <div>
+                    <label for="max_records">Store record cap</label>
+                    <input id="max_records" name="store_max_records" type="number" min="1" max="100000" value="500" required>
+                </div>
+                <div>
+                    <label for="store_overflow_policy">When Store is full</label>
+                    <select id="store_overflow_policy" name="store_overflow_policy">
+                        <option value="reject">Reject new records</option>
+                        <option value="delete_oldest">Delete oldest record</option>
+                    </select>
+                </div>
+            </div>
+            <div>
+                <label for="max_request_bytes">Max request bytes</label>
+                <input id="max_request_bytes" name="max_request_bytes" type="number" min="128" max="2048" value="2048" required>
+            </div>
+            <div class="grid grid-2">
+                <div>
+                    <label for="read_rate_limit">Read rate / minute</label>
+                    <input id="read_rate_limit" name="read_rate_limit" type="number" min="1" max="10000" value="100" required>
+                </div>
+                <div>
+                    <label for="write_rate_limit">Write rate / minute</label>
+                    <input id="write_rate_limit" name="write_rate_limit" type="number" min="1" max="10000" value="20" required>
+                </div>
+            </div>
+            <button type="submit">Create project</button>
+        </form>
+        <div class="card" style="margin-top:1rem; background: rgba(2,6,23,.3);">
+            <strong>Hoard storage</strong>
+            <div class="kv small" style="margin-top:.55rem;">
+                <div class="muted">Path</div><div class="mono">{{ stats.database.path }}</div>
+                <div class="muted">Used pages</div><div>{{ human_bytes(stats.database.used_bytes) }}</div>
+                <div class="muted">Reusable pages</div><div>{{ human_bytes(stats.database.reusable_bytes) }}</div>
+                <div class="muted">Allocated DB</div><div>{{ human_bytes(stats.database.allocated_bytes) }}</div>
+                <div class="muted">Physical file</div><div>{{ human_bytes(stats.database.database_bytes) }}</div>
+                <div class="muted">WAL size</div><div>{{ human_bytes(stats.database.wal_bytes) }}</div>
+                <div class="muted">SHM size</div><div>{{ human_bytes(stats.database.shm_bytes) }}</div>
+            </div>
+            <div class="muted small" style="margin-top:.7rem; line-height:1.45;">
+                SQLite keeps deleted pages ready for reuse, so the physical file may stay the same size after deleting data. "Used pages" shows the more useful live figure.
+            </div>
+        </div>
+    </aside>
+</div>
+{% endblock %}

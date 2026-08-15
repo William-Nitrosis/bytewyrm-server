@@ -1,0 +1,61 @@
+services:
+  api:
+    build:
+      context: ./api
+
+    image: bytewyrm:local
+    container_name: bytewyrm-api
+    restart: unless-stopped
+    environment:
+      DATABASE_PATH: /data/database/server.db
+    volumes:
+      - /srv/data/bytewyrm/database:/data/database
+    networks:
+      - public_api
+
+
+  admin:
+    build:
+      context: ./api
+
+    image: bytewyrm:local
+    container_name: bytewyrm-admin
+    restart: unless-stopped
+    command:
+      - uvicorn
+      - admin_main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8001"
+    ports:
+      - "${ADMIN_BIND_HOST:-192.168.50.2}:8001:8001"
+    environment:
+      DATABASE_PATH: /data/database/server.db
+      ADMIN_TOKEN: "${ADMIN_TOKEN:?Set ADMIN_TOKEN in .env before starting the admin service}"
+    volumes:
+      - /srv/data/bytewyrm/database:/data/database
+    networks:
+      - admin_net
+
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: bytewyrm-tunnel
+    restart: unless-stopped
+    command:
+      - tunnel
+      - --no-autoupdate
+      - run
+    environment:
+      TUNNEL_TOKEN: "${TUNNEL_TOKEN:?Set TUNNEL_TOKEN in .env before starting cloudflared}"
+    depends_on:
+      - api
+    networks:
+      - public_api
+
+
+networks:
+  public_api:
+
+  admin_net:
