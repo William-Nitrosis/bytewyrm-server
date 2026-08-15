@@ -39,23 +39,41 @@ services:
       - admin_net
 
 
+  homepage:
+    image: nginx:alpine
+    container_name: bytewyrm-homepage
+    restart: unless-stopped
+
+    volumes:
+      - ./site:/usr/share/nginx/html:ro
+
+    networks:
+      - homepage_net
+
+
   cloudflared:
     image: cloudflare/cloudflared:latest
     container_name: bytewyrm-tunnel
     restart: unless-stopped
+
     command:
       - tunnel
       - --no-autoupdate
       - run
+
     environment:
       TUNNEL_TOKEN: "${TUNNEL_TOKEN:?Set TUNNEL_TOKEN in .env before starting cloudflared}"
+
     depends_on:
       - api
+      - homepage
+
     networks:
       - public_api
+      - homepage_net
 
 
 networks:
   public_api:
-
   admin_net:
+  homepage_net:

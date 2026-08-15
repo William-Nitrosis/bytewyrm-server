@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="g" x1="10" y1="8" x2="54" y2="56" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ff9954"/>
+      <stop offset=".55" stop-color="#e56527"/>
+      <stop offset="1" stop-color="#8c310f"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="18" fill="#0c0e11"/>
+  <path d="M13 15c8-8 23-9 32-3 7 5 10 13 7 22-3 10-14 16-25 14l-8 6 2-10c-8-5-11-18-8-29Z" fill="url(#g)" stroke="#ffb27f" stroke-opacity=".22"/>
+  <text x="32" y="37" text-anchor="middle" font-family="Arial, sans-serif" font-size="17" font-weight="800" fill="#fff5ec" letter-spacing="1">BW</text>
+</svg>

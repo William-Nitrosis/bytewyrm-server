@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="ByteWyrm gives small Python game projects simple online tools without making students build or manage a server themselves.">
+  <meta name="theme-color" content="#0b0c0f">
+  <title>ByteWyrm — Tiny online tools for small Python games</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/script.js" defer></script>
+</head>
+<body>
+  <div class="ambient ambient-one" aria-hidden="true"></div>
+  <div class="ambient ambient-two" aria-hidden="true"></div>
+
+  <header class="site-header">
+    <div class="shell nav-wrap">
+      <a class="brand" href="#top" aria-label="ByteWyrm home">
+        <span class="brand-mark" aria-hidden="true">BW</span>
+        <span class="brand-word">ByteWyrm</span>
+      </a>
+
+      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">
+        <span></span><span></span><span></span>
+        <span class="sr-only">Toggle navigation</span>
+      </button>
+
+      <nav class="site-nav" id="site-nav" aria-label="Main navigation">
+        <a href="#quick-start">Get started</a>
+        <a href="#docs">Docs</a>
+        <a href="#examples">Examples</a>
+        <a href="https://pypi.org/project/bytewyrm/" target="_blank" rel="noreferrer">PyPI</a>
+        <a href="https://github.com/William-Nitrosis/bytewyrm" target="_blank" rel="noreferrer">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="hero shell">
+      <div class="hero-copy">
+        <div class="eyebrow"><span class="status-dot"></span> Alpha · built for learning</div>
+        <div class="hero-logo-placeholder" aria-label="ByteWyrm logo placeholder">
+          <span class="wyrm-ring">BW</span>
+          <div>
+            <p class="hero-brand">BYTEWYRM</p>
+            <p class="hero-kicker">Tiny online tools for small games</p>
+          </div>
+        </div>
+        <h1>Put game data online.<br><span>Skip the backend headache.</span></h1>
+        <p class="hero-lead">
+          ByteWyrm gives small Python projects a simple way to save and retrieve data online — without students having to manage HTTP requests, JSON, authentication headers, databases, or servers.
+        </p>
+
+        <div class="hero-actions">
+          <a class="button button-primary" href="#quick-start">Get started</a>
+          <a class="button button-secondary" href="https://github.com/William-Nitrosis/bytewyrm" target="_blank" rel="noreferrer">View on GitHub</a>
+        </div>
+
+        <div class="install-strip" aria-label="Install ByteWyrm">
+          <span class="prompt">$</span>
+          <code>python -m pip install bytewyrm</code>
+          <button class="copy-button" type="button" data-copy="python -m pip install bytewyrm">Copy</button>
+        </div>
+      </div>
+
+      <div class="hero-code card glow-card">
+        <div class="code-window-bar">
+          <span class="window-dot"></span><span class="window-dot"></span><span class="window-dot"></span>
+          <span>scores.py</span>
+        </div>
+        <pre><code><span class="kw">from</span> bytewyrm <span class="kw">import</span> ByteWyrm
+
+wyrm = ByteWyrm(<span class="str">"bwk_YOUR_KEY_HERE"</span>)
+
+wyrm.store.add(
+    player=<span class="str">"Drake"</span>,
+    score=<span class="num">12500</span>,
+)
+
+scores = wyrm.store.records(
+    sort_by=<span class="str">"score"</span>,
+    reverse=<span class="bool">True</span>,
+    limit=<span class="num">10</span>,
+)
+
+<span class="kw">for</span> score <span class="kw">in</span> scores:
+    <span class="fn">print</span>(score[<span class="str">"player"</span>], score[<span class="str">"score"</span>])</code></pre>
+        <div class="code-caption"><span class="ember-dot"></span> Real online data, regular Python.</div>
+      </div>
+    </section>
+
+    <section class="section shell" id="why">
+      <div class="section-heading narrow">
+        <p class="section-kicker">Why ByteWyrm?</p>
+        <h2>Keep the lesson about the game.</h2>
+        <p>Putting data online normally introduces a pile of backend concepts at once. ByteWyrm keeps those details behind a small Python interface so students can focus on the project they are actually building.</p>
+      </div>
+
+      <div class="compare-grid">
+        <article class="card compare-card muted-card">
+          <div class="card-label">Without ByteWyrm</div>
+          <ul class="complexity-list">
+            <li>HTTP requests and URLs</li>
+            <li>Headers and bearer tokens</li>
+            <li>JSON encoding and parsing</li>
+            <li>Status codes and pagination</li>
+            <li>Database and server details</li>
+          </ul>
+        </article>
+
+        <article class="card compare-card featured-card">
+          <div class="card-label">With ByteWyrm</div>
+          <pre class="mini-code"><code>wyrm.store.add(
+    player=<span class="str">"Drake"</span>,
+    score=<span class="num">12500</span>,
+)</code></pre>
+          <p>Students work with familiar Python values and dictionaries. ByteWyrm handles the networking and rules underneath.</p>
+        </article>
+      </div>
+
+      <div class="feature-grid">
+        <article class="feature-card"><span class="feature-icon">{ }</span><h3>Simple Python</h3><p>Small methods, dictionaries, integers, floats, booleans and text.</p></article>
+        <article class="feature-card"><span class="feature-icon">⌁</span><h3>Safe limits</h3><p>Projects can enforce schemas, quotas, write limits and record rules.</p></article>
+        <article class="feature-card"><span class="feature-icon">↕</span><h3>Useful queries</h3><p>Sort, filter and limit records without teaching a database query language.</p></article>
+        <article class="feature-card"><span class="feature-icon">◇</span><h3>Made for small games</h3><p>Scores, times, progress values, flags and other lightweight project data.</p></article>
+      </div>
+    </section>
+
+    <section class="section section-panel" id="audience">
+      <div class="shell">
+        <div class="section-heading">
+          <p class="section-kicker">Who is it for?</p>
+          <h2>One service, two simple jobs.</h2>
+        </div>
+
+        <div class="audience-grid">
+          <article class="card audience-card">
+            <div class="audience-number">01</div>
+            <p class="card-label">For students</p>
+            <h3>Get a key. Write normal Python.</h3>
+            <p>Your tutor gives you a ByteWyrm key. Install the package, connect once, then use the tools inside your <code>wyrm</code> object.</p>
+          </article>
+          <article class="card audience-card">
+            <div class="audience-number">02</div>
+            <p class="card-label">For tutors</p>
+            <h3>Set the rules before students connect.</h3>
+            <p>Create a Project, choose the Store fields and limits, then generate scoped API keys for the students or games that need them.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section shell" id="quick-start">
+      <div class="section-heading">
+        <p class="section-kicker">Quick start</p>
+        <h2>From install to online data in four steps.</h2>
+      </div>
+
+      <div class="steps">
+        <article class="step card">
+          <span class="step-number">1</span>
+          <h3>Install</h3>
+          <div class="inline-code-row"><code>python -m pip install bytewyrm</code><button class="copy-button compact" data-copy="python -m pip install bytewyrm">Copy</button></div>
+        </article>
+        <article class="step card">
+          <span class="step-number">2</span>
+          <h3>Connect</h3>
+          <pre><code><span class="kw">from</span> bytewyrm <span class="kw">import</span> ByteWyrm
+
+wyrm = ByteWyrm(<span class="str">"bwk_YOUR_KEY_HERE"</span>)</code></pre>
+        </article>
+        <article class="step card">
+          <span class="step-number">3</span>
+          <h3>Save data</h3>
+          <pre><code>wyrm.store.add(
+    player=<span class="str">"Drake"</span>,
+    score=<span class="num">12500</span>,
+)</code></pre>
+        </article>
+        <article class="step card">
+          <span class="step-number">4</span>
+          <h3>Read it back</h3>
+          <pre><code>records = wyrm.store.records()
+
+<span class="kw">for</span> record <span class="kw">in</span> records:
+    <span class="fn">print</span>(record[<span class="str">"player"</span>])</code></pre>
+        </article>
+      </div>
+    </section>
+
+    <section class="section section-panel" id="docs">
+      <div class="shell">
+        <div class="section-heading">
+          <p class="section-kicker">Store docs</p>
+          <h2>The bits students actually need.</h2>
+          <p>Store is ByteWyrm's first tool: save small structured records, read them back, and optionally ask the server to sort or filter the result.</p>
+        </div>
+
+        <div class="docs-grid">
+          <article class="doc-card card">
+            <div class="method"><span>Store</span><code>.add()</code></div>
+            <p>Save a record using ordinary keyword arguments.</p>
+            <pre><code>wyrm.store.add(
+    player=<span class="str">"Drake"</span>,
+    score=<span class="num">12500</span>,
+)</code></pre>
+          </article>
+          <article class="doc-card card">
+            <div class="method"><span>Store</span><code>.records()</code></div>
+            <p>Get records back. Newest records are returned first by default.</p>
+            <pre><code>records = wyrm.store.records(
+    limit=<span class="num">10</span>,
+)</code></pre>
+          </article>
+          <article class="doc-card card">
+            <div class="method"><span>Store</span><code>.latest()</code></div>
+            <p>Get only the newest record, or <code>None</code> if the Store is empty.</p>
+            <pre><code>latest = wyrm.store.latest()
+
+<span class="kw">if</span> latest:
+    <span class="fn">print</span>(latest[<span class="str">"score"</span>])</code></pre>
+          </article>
+          <article class="doc-card card">
+            <div class="method"><span>Store</span><code>.schema()</code></div>
+            <p>Inspect the fields and rules configured for the Project's Store.</p>
+            <pre><code><span class="fn">print</span>(wyrm.store.schema())</code></pre>
+          </article>
+          <article class="doc-card card wide-doc">
+            <div class="method"><span>Records</span><code>sort + filter</code></div>
+            <p>Keep queries deliberately small: one filter at a time, plus optional sorting and a limit.</p>
+            <pre><code>results = wyrm.store.records(
+    where=<span class="str">"completed"</span>,
+    equals=<span class="bool">True</span>,
+    sort_by=<span class="str">"score"</span>,
+    reverse=<span class="bool">True</span>,
+    limit=<span class="num">10</span>,
+)</code></pre>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section shell" id="examples">
+      <div class="section-heading">
+        <p class="section-kicker">Examples</p>
+        <h2>Small recipes for common game data.</h2>
+      </div>
+
+      <div class="example-grid">
+        <article class="example-card card">
+          <div class="example-top"><span class="example-glyph">▲</span><div><p class="card-label">High scores</p><h3>Highest first</h3></div></div>
+          <pre><code>scores = wyrm.store.records(
+    sort_by=<span class="str">"score"</span>,
+    reverse=<span class="bool">True</span>,
+    limit=<span class="num">10</span>,
+)</code></pre>
+        </article>
+        <article class="example-card card">
+          <div class="example-top"><span class="example-glyph">⌛</span><div><p class="card-label">Lap times</p><h3>Fastest first</h3></div></div>
+          <pre><code>times = wyrm.store.records(
+    sort_by=<span class="str">"time"</span>,
+    limit=<span class="num">10</span>,
+)</code></pre>
+        </article>
+        <article class="example-card card">
+          <div class="example-top"><span class="example-glyph">✓</span><div><p class="card-label">Completed levels</p><h3>Filter a flag</h3></div></div>
+          <pre><code>completed = wyrm.store.records(
+    where=<span class="str">"completed"</span>,
+    equals=<span class="bool">True</span>,
+)</code></pre>
+        </article>
+      </div>
+    </section>
+
+    <section class="section shell" id="how-it-works">
+      <div class="section-heading narrow">
+        <p class="section-kicker">How it works</p>
+        <h2>The complicated bits stay out of student code.</h2>
+      </div>
+
+      <div class="flow card">
+        <div class="flow-node"><span class="flow-icon">PY</span><strong>Your game</strong><small>Normal Python code</small></div>
+        <div class="flow-arrow"><span>›</span><small>ByteWyrm package</small></div>
+        <div class="flow-node"><span class="flow-icon flame">BW</span><strong>ByteWyrm API</strong><small>Validation + rules</small></div>
+        <div class="flow-arrow"><span>›</span><small>Project key</small></div>
+        <div class="flow-node"><span class="flow-icon">DB</span><strong>Store</strong><small>Small online records</small></div>
+      </div>
+    </section>
+
+    <section class="section shell" id="safety">
+      <div class="safety-card">
+        <div class="safety-mark">!</div>
+        <div>
+          <p class="section-kicker">Data safety</p>
+          <h2>Keep it game data.</h2>
+          <p>ByteWyrm is designed for small amounts of <strong>non-sensitive game data only</strong>: scores, player nicknames, lap times, progress values, flags and similar project data.</p>
+          <p>Do not store real names, email addresses, passwords, addresses, private messages, medical information, or other personal, sensitive, or confidential information.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-panel links-section" id="links">
+      <div class="shell">
+        <div class="section-heading">
+          <p class="section-kicker">Links</p>
+          <h2>Keep exploring.</h2>
+        </div>
+
+        <div class="link-grid">
+          <a class="link-card" href="https://pypi.org/project/bytewyrm/" target="_blank" rel="noreferrer"><span class="link-icon">Py</span><div><strong>PyPI</strong><small>Install the Python package</small></div><span class="link-arrow">↗</span></a>
+          <a class="link-card" href="https://github.com/William-Nitrosis/bytewyrm" target="_blank" rel="noreferrer"><span class="link-icon">&lt;/&gt;</span><div><strong>Client GitHub</strong><small>Source, README and issues</small></div><span class="link-arrow">↗</span></a>
+          <a class="link-card" href="https://github.com/William-Nitrosis/bytewyrm-server" target="_blank" rel="noreferrer"><span class="link-icon">Srv</span><div><strong>Server GitHub</strong><small>Self-hosted backend source</small></div><span class="link-arrow">↗</span></a>
+          <a class="link-card" href="https://api.bytewyrm.dev" target="_blank" rel="noreferrer"><span class="link-icon">API</span><div><strong>API</strong><small>ByteWyrm's public endpoint</small></div><span class="link-arrow">↗</span></a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="shell footer-inner">
+      <div class="brand footer-brand"><span class="brand-mark">BW</span><span class="brand-word">ByteWyrm</span></div>
+      <p>Tiny online tools for small Python game projects.</p>
+      <a href="#top">Back to top ↑</a>
+    </div>
+  </footer>
+</body>
+</html>
