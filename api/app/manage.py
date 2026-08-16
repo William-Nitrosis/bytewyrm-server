@@ -5,6 +5,7 @@ import secrets
 import sqlite3
 import sys
 
+from audit import list_audit_events, record_cli_audit_event
 from auth import hash_api_key
 from database import create_tables, get_db
 from tutors import get_superadmin
@@ -74,7 +75,7 @@ def create_project(args: argparse.Namespace) -> None:
     with get_db() as db:
         superadmin = get_superadmin(db)
         owner_tutor_id = superadmin.id if superadmin is not None else None
-        db.execute(
+        cursor = db.execute(
             """
             INSERT INTO containers (
                 public_id,
@@ -98,6 +99,15 @@ def create_project(args: argparse.Namespace) -> None:
                 args.write_rate_limit,
                 owner_tutor_id,
             ),
+        )
+        record_cli_audit_event(
+            db,
+            action="project.created",
+            object_type="project",
+            object_id=public_id,
+            project_public_id=public_id,
+            project_name=args.name,
+            summary=f"Created Project '{args.name}' through manage.py",
         )
 
     print("Project created")
@@ -291,6 +301,15 @@ def add_field(args: argparse.Namespace) -> None:
                 text_max_length,
             ),
         )
+        record_cli_audit_event(
+            db,
+            action="store.field_added",
+            object_type="store_field",
+            object_id=args.name,
+            project_public_id=project["public_id"],
+            project_name=project["name"],
+            summary=f"Added {field_type} Store field '{args.name}' through manage.py",
+        )
 
     print(
         f"Added {field_type} field '{args.name}' to "
@@ -382,6 +401,15 @@ def remove_field(args: argparse.Namespace) -> None:
             """,
             (project["id"], field["position"]),
         )
+        record_cli_audit_event(
+            db,
+            action="store.field_removed",
+            object_type="store_field",
+            object_id=field["name"],
+            project_public_id=project["public_id"],
+            project_name=project["name"],
+            summary=f"Removed Store field '{field['name']}' through manage.py",
+        )
 
     print(f"Removed field '{field['name']}' from {project['public_id']}")
 
@@ -433,6 +461,15 @@ def configure_store(args: argparse.Namespace) -> None:
             """,
             (mode, key_field, compare_field, read_scope, owner_only, project["id"]),
         )
+        record_cli_audit_event(
+            db,
+            action="project.updated",
+            object_type="project",
+            object_id=project["public_id"],
+            project_public_id=project["public_id"],
+            project_name=project["name"],
+            summary=f"Updated Store configuration for '{project['name']}' through manage.py",
+        )
 
     print(f"Store configuration for {project['public_id']} ({project['name']}):")
     print(f"  Record mode:          {mode}")
@@ -456,7 +493,7 @@ def create_key(args: argparse.Namespace) -> None:
 
     with get_db() as db:
         project = get_project(db, args.project)
-        db.execute(
+        cursor = db.execute(
             """
             INSERT INTO api_keys (
                 container_id,
@@ -478,6 +515,16 @@ def create_key(args: argparse.Namespace) -> None:
                 int(can_read),
                 int(can_write),
             ),
+        )
+        key_id = int(cursor.lastrowid)
+        record_cli_audit_event(
+            db,
+            action="api_key.created",
+            object_type="api_key",
+            object_id=key_id,
+            project_public_id=project["public_id"],
+            project_name=project["name"],
+            summary=f"Created API key '{args.name}' ({permissions}) through manage.py",
         )
 
     print("API key created")
@@ -533,7 +580,13 @@ def list_keys(args: argparse.Namespace) -> None:
 def revoke_key(args: argparse.Namespace) -> None:
     with get_db() as db:
         project = get_project(db, args.project)
-        cursor = db.execute(
+        key_row = db.execute(
+            "SELECT name FROM api_keys WHERE id = ? AND container_id = ?",
+            (args.key_id, project["id"]),
+        ).fetchone()
+        if key_row is None:
+            raise SystemExit("API key not found for that project")
+        db.execute(
             """
             UPDATE api_keys
             SET enabled = 0
@@ -541,9 +594,15 @@ def revoke_key(args: argparse.Namespace) -> None:
             """,
             (args.key_id, project["id"]),
         )
-
-        if cursor.rowcount == 0:
-            raise SystemExit("API key not found for that project")
+        record_cli_audit_event(
+            db,
+            action="api_key.revoked",
+            object_type="api_key",
+            object_id=args.key_id,
+            project_public_id=project["public_id"],
+            project_name=project["name"],
+            summary=f"Revoked API key '{key_row['name']}' through manage.py",
+        )
 
     print(f"Revoked API key id={args.key_id} for {project['public_id']}")
 
@@ -579,11 +638,37 @@ def set_project_enabled(args: argparse.Namespace, enabled: bool) -> None:
             "UPDATE containers SET enabled = ? WHERE id = ?",
             (int(enabled), project["id"]),
         )
+        record_cli_audit_event(
+            db,
+            action="project.updated",
+            object_type="project",
+            object_id=project["public_id"],
+            project_public_id=project["public_id"],
+            project_name=project["name"],
+            summary=f"{'Enabled' if enabled else 'Disabled'} Project '{project['name']}' through manage.py",
+        )
 
     print(
         f"Project {project['public_id']} is now "
         f"{'enabled' if enabled else 'disabled'}"
     )
+
+
+def list_audit_log(args: argparse.Namespace) -> None:
+    with get_db() as db:
+        rows = list_audit_events(db, limit=args.limit)
+
+    if not rows:
+        print("No audit events recorded yet.")
+        return
+
+    for row in rows:
+        actor = row["actor_display_name"] or row["actor_email"]
+        project = f"  {row['project_public_id']}" if row["project_public_id"] else ""
+        print(
+            f"{row['id']:>5}  {row['created_at']}  {actor}  "
+            f"{row['action']}{project}  {row['summary']}"
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -597,6 +682,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="List registered ByteWyrm tutors (never changes accounts)",
     )
     list_tutors_parser.set_defaults(func=list_tutors)
+
+    audit_parser = subparsers.add_parser(
+        "audit-log",
+        help="Show recent administrative audit events",
+    )
+    audit_parser.add_argument("--limit", type=int, default=50, choices=range(1, 251), metavar="1..250")
+    audit_parser.set_defaults(func=list_audit_log)
 
     create_container_parser = subparsers.add_parser(
         "create-project",

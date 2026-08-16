@@ -14,7 +14,7 @@ from settings import HARD_MAX_REQUEST_SIZE
 from usage import record_api_usage
 
 
-APP_VERSION = "0.11.0"
+APP_VERSION = "0.13.0"
 
 app = FastAPI(
     title="ByteWyrm API",

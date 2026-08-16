@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 
+from audit import audit_stats, list_audit_events, record_audit_event
 from admin_auth import (
     SESSION_COOKIE_NAME,
     has_authorized_access_identity,
@@ -46,7 +47,7 @@ from tutors import (
 )
 
 
-APP_VERSION = "0.12.0"
+APP_VERSION = "0.13.0"
 ADMIN_MAX_REQUEST_SIZE = 16 * 1024
 PROJECT_ID_PREFIX = "prj_"
 API_KEY_PREFIX = "bwk_"
@@ -61,6 +62,7 @@ app = FastAPI(
     ),
     openapi_tags=[
         {"name": "Core", "description": "Service health and overall statistics."},
+        {"name": "Audit", "description": "Superadmin-only administrative audit events."},
         {"name": "Projects", "description": "Create and configure ByteWyrm projects."},
         {"name": "Project Keys", "description": "Project-scoped API key management."},
         {"name": "Store", "description": "Schema and record management for the Store tool."},
@@ -562,6 +564,24 @@ def _validation_message(exc: HTTPException) -> str:
     return str(detail)
 
 
+def _project_change_labels(before: sqlite3.Row, after: sqlite3.Row) -> list[str]:
+    fields = [
+        ("name", "name"),
+        ("enabled", "status"),
+        ("max_records", "Store record cap"),
+        ("store_overflow_policy", "Store full policy"),
+        ("store_record_mode", "Store record mode"),
+        ("store_key_field", "Store key field"),
+        ("store_compare_field", "Store compare field"),
+        ("store_read_scope", "Store read scope"),
+        ("store_owner_only", "creator-only updates"),
+        ("max_request_bytes", "request-size limit"),
+        ("read_rate_limit", "read rate limit"),
+        ("write_rate_limit", "write rate limit"),
+    ]
+    return [label for column, label in fields if before[column] != after[column]]
+
+
 def _validated_store_behavior_update(
     db: sqlite3.Connection,
     project: sqlite3.Row,
@@ -869,6 +889,57 @@ def dashboard_tutors(request: Request):
     )
 
 
+@app.get("/dashboard/audit", response_class=HTMLResponse, dependencies=[Depends(require_admin_session)], include_in_schema=False)
+def dashboard_audit(
+    request: Request,
+    actor: Annotated[str | None, Query(max_length=40)] = None,
+    category: Annotated[str | None, Query(max_length=20)] = None,
+    before_id: Annotated[int | None, Query(gt=0)] = None,
+):
+    _require_superadmin_dashboard(request)
+    if category not in {None, "project", "store", "api_key", "tutor", "security"}:
+        category = None
+
+    with get_db() as db:
+        tutors = _list_tutors_admin_data(db)
+        rows = list_audit_events(
+            db,
+            limit=101,
+            before_id=before_id,
+            actor=actor,
+            category=category,
+        )
+        stats = audit_stats(db)
+
+    has_more = len(rows) > 100
+    events = rows[:100]
+    next_before_id = events[-1]["id"] if has_more and events else None
+    filter_params: dict[str, str] = {}
+    if actor:
+        filter_params["actor"] = actor
+    if category:
+        filter_params["category"] = category
+    next_url = None
+    if next_before_id is not None:
+        filter_params["before_id"] = str(next_before_id)
+        next_url = "/dashboard/audit?" + urlencode(filter_params)
+
+    return TEMPLATES.TemplateResponse(
+        request,
+        "audit.html",
+        _base_context(
+            request,
+            page_title="Audit Log",
+            audit_events=events,
+            audit_stats=stats,
+            tutors=tutors,
+            selected_actor=actor or "",
+            selected_category=category or "",
+            next_url=next_url,
+        ),
+    )
+
+
 @app.post("/dashboard/tutors", dependencies=[Depends(require_admin_session)], include_in_schema=False)
 def dashboard_create_tutor(
     request: Request,
@@ -898,6 +969,14 @@ def dashboard_create_tutor(
                 (normalized_email, name, role),
             )
             tutor_id = cursor.lastrowid
+            record_audit_event(
+                db,
+                request,
+                action="tutor.created",
+                object_type="tutor",
+                object_id=tutor_id,
+                summary=f"Added tutor {normalized_email} as {role}",
+            )
     except sqlite3.IntegrityError:
         return _redirect("/dashboard/tutors", "A tutor with that email already exists", "error")
 
@@ -993,6 +1072,27 @@ def dashboard_update_tutor(
             (name, role, int(new_enabled), target.id),
         )
 
+        if target.display_name != name:
+            record_audit_event(
+                db, request,
+                action="tutor.updated", object_type="tutor", object_id=target.id,
+                summary=f"Updated display name for tutor {target.email}",
+            )
+        if target.role != role:
+            record_audit_event(
+                db, request,
+                action="tutor.role_changed", object_type="tutor", object_id=target.id,
+                summary=f"Changed tutor {target.email} role: {target.role} → {role}",
+            )
+        if target.enabled != new_enabled:
+            action = "tutor.enabled" if new_enabled else "tutor.disabled"
+            verb = "Enabled" if new_enabled else "Disabled"
+            record_audit_event(
+                db, request,
+                action=action, object_type="tutor", object_id=target.id,
+                summary=f"{verb} tutor {target.email}",
+            )
+
     return _redirect(f"/dashboard/tutors/{tutor_id}", "Tutor settings updated", "success")
 
 
@@ -1061,6 +1161,12 @@ def dashboard_create_project(
             ),
         )
         _project_summary(db, cursor.lastrowid)
+        record_audit_event(
+            db, request,
+            action="project.created", object_type="project", object_id=public_id,
+            project_public_id=public_id, project_name=payload.name,
+            summary=f"Created Project '{payload.name}'",
+        )
     return _redirect(f"/dashboard/projects/{public_id}", "Project created", "success")
 
 
@@ -1147,6 +1253,15 @@ def dashboard_update_project(
                     project["id"],
                 ),
             )
+            updated = db.execute("SELECT * FROM containers WHERE id = ?", (project["id"],)).fetchone()
+            changes = _project_change_labels(project, updated)
+            if changes:
+                record_audit_event(
+                    db, request,
+                    action="project.updated", object_type="project", object_id=project_id,
+                    project_public_id=project_id, project_name=updated["name"],
+                    summary=f"Updated Project '{updated['name']}' ({', '.join(changes)})",
+                )
     except HTTPException as exc:
         return _redirect(f"/dashboard/projects/{project_id}", str(exc.detail), "error")
 
@@ -1158,6 +1273,12 @@ def dashboard_delete_project(request: Request, project_id: str):
     with get_db() as db:
         project = _project_or_404(db, project_id, _request_tutor(request))
         internal_id = project["id"]
+        record_audit_event(
+            db, request,
+            action="project.deleted", object_type="project", object_id=project_id,
+            project_public_id=project_id, project_name=project["name"],
+            summary=f"Deleted Project '{project['name']}'",
+        )
         db.execute("DELETE FROM record_values WHERE container_id = ?", (internal_id,))
         db.execute("DELETE FROM records WHERE container_id = ?", (internal_id,))
         db.execute("DELETE FROM api_keys WHERE container_id = ?", (internal_id,))
@@ -1232,6 +1353,12 @@ def dashboard_add_field(
                     payload.text_max_length,
                 ),
             )
+            record_audit_event(
+                db, request,
+                action="store.field_added", object_type="store_field", object_id=payload.name,
+                project_public_id=project_id, project_name=project["name"],
+                summary=f"Added {payload.type} Store field '{payload.name}' to '{project['name']}'",
+            )
     except sqlite3.IntegrityError:
         return _redirect(f"/dashboard/projects/{project_id}", "Field already exists or violates schema constraints", "error")
     except HTTPException as exc:
@@ -1273,6 +1400,12 @@ def dashboard_remove_field(request: Request, project_id: str, field_name: str):
                 WHERE container_id = ? AND position > ?
                 """,
                 (project["id"], field["position"]),
+            )
+            record_audit_event(
+                db, request,
+                action="store.field_removed", object_type="store_field", object_id=field_name,
+                project_public_id=project_id, project_name=project["name"],
+                summary=f"Removed Store field '{field_name}' from '{project['name']}'",
             )
     except HTTPException as exc:
         return _redirect(f"/dashboard/projects/{project_id}", str(exc.detail), "error")
@@ -1321,6 +1454,13 @@ def dashboard_create_key(
             ),
         )
 
+        key_id = int(cursor.lastrowid)
+        record_audit_event(
+            db, request,
+            action="api_key.created", object_type="api_key", object_id=key_id,
+            project_public_id=project_id, project_name=project["name"],
+            summary=f"Created API key '{payload.name}' ({payload.permissions}) for '{project['name']}'",
+        )
         data = _project_detail_context(db, project_id, _request_tutor(request))
 
     return TEMPLATES.TemplateResponse(
@@ -1335,7 +1475,7 @@ def dashboard_create_key(
             can_read=can_read,
             can_write=can_write,
             api_key=api_key,
-            key_id=cursor.lastrowid,
+            key_id=key_id,
         ),
     )
 
@@ -1344,12 +1484,22 @@ def dashboard_create_key(
 def dashboard_revoke_key(request: Request, project_id: str, key_id: int):
     with get_db() as db:
         project = _project_or_404(db, project_id, _request_tutor(request))
-        cursor = db.execute(
+        key_row = db.execute(
+            "SELECT name FROM api_keys WHERE id = ? AND container_id = ?",
+            (key_id, project["id"]),
+        ).fetchone()
+        if key_row is None:
+            return _redirect(f"/dashboard/projects/{project_id}", "API key not found", "error")
+        db.execute(
             "UPDATE api_keys SET enabled = 0 WHERE id = ? AND container_id = ?",
             (key_id, project["id"]),
         )
-        if cursor.rowcount == 0:
-            return _redirect(f"/dashboard/projects/{project_id}", "API key not found", "error")
+        record_audit_event(
+            db, request,
+            action="api_key.revoked", object_type="api_key", object_id=key_id,
+            project_public_id=project_id, project_name=project["name"],
+            summary=f"Revoked API key '{key_row['name']}' for '{project['name']}'",
+        )
     return _redirect(f"/dashboard/projects/{project_id}", "API key revoked", "success")
 
 
@@ -1357,12 +1507,22 @@ def dashboard_revoke_key(request: Request, project_id: str, key_id: int):
 def dashboard_enable_key(request: Request, project_id: str, key_id: int):
     with get_db() as db:
         project = _project_or_404(db, project_id, _request_tutor(request))
-        cursor = db.execute(
+        key_row = db.execute(
+            "SELECT name FROM api_keys WHERE id = ? AND container_id = ?",
+            (key_id, project["id"]),
+        ).fetchone()
+        if key_row is None:
+            return _redirect(f"/dashboard/projects/{project_id}", "API key not found", "error")
+        db.execute(
             "UPDATE api_keys SET enabled = 1 WHERE id = ? AND container_id = ?",
             (key_id, project["id"]),
         )
-        if cursor.rowcount == 0:
-            return _redirect(f"/dashboard/projects/{project_id}", "API key not found", "error")
+        record_audit_event(
+            db, request,
+            action="api_key.enabled", object_type="api_key", object_id=key_id,
+            project_public_id=project_id, project_name=project["name"],
+            summary=f"Enabled API key '{key_row['name']}' for '{project['name']}'",
+        )
     return _redirect(f"/dashboard/projects/{project_id}", "API key enabled", "success")
 
 
@@ -1385,13 +1545,22 @@ async def dashboard_create_record(request: Request, project_id: str):
             _writable_key_or_404(db, project["id"], creator_key_id)
             fields = load_container_schema(db, project["id"])
             payload = _record_payload_from_form(form, fields)
-            _, created, changed = write_store_record(
+            result, created, changed = write_store_record(
                 db,
                 project["id"],
                 creator_key_id,
                 payload,
                 store_config_from_row(project),
             )
+            if created or changed:
+                audit_action = "store.record_created" if created else "store.record_updated"
+                verb = "Created" if created else "Updated"
+                record_audit_event(
+                    db, request,
+                    action=audit_action, object_type="store_record", object_id=result["id"],
+                    project_public_id=project_id, project_name=project["name"],
+                    summary=f"{verb} Store record #{result['id']} in '{project['name']}'",
+                )
     except ValueError as exc:
         return _redirect(f"/dashboard/projects/{project_id}", str(exc), "error")
     except HTTPException as exc:
@@ -1461,6 +1630,12 @@ async def dashboard_edit_record(request: Request, project_id: str, record_id: in
                 payload,
                 store_config_from_row(project),
             )
+            record_audit_event(
+                db, request,
+                action="store.record_updated", object_type="store_record", object_id=record_id,
+                project_public_id=project_id, project_name=project["name"],
+                summary=f"Updated Store record #{record_id} in '{project['name']}'",
+            )
     except ValueError as exc:
         return _redirect(
             f"/dashboard/projects/{project_id}/store/records/{record_id}/edit",
@@ -1487,6 +1662,12 @@ def dashboard_delete_record(request: Request, project_id: str, record_id: int):
         )
         if cursor.rowcount == 0:
             return _redirect(f"/dashboard/projects/{project_id}", "Store record not found", "error")
+        record_audit_event(
+            db, request,
+            action="store.record_deleted", object_type="store_record", object_id=record_id,
+            project_public_id=project_id, project_name=project["name"],
+            summary=f"Deleted Store record #{record_id} from '{project['name']}'",
+        )
     return _redirect(f"/dashboard/projects/{project_id}", "Store record deleted", "success")
 
 
@@ -1494,7 +1675,17 @@ def dashboard_delete_record(request: Request, project_id: str, record_id: int):
 def dashboard_clear_records(request: Request, project_id: str):
     with get_db() as db:
         project = _project_or_404(db, project_id, _request_tutor(request))
+        count = db.execute(
+            "SELECT COUNT(*) AS count FROM records WHERE container_id = ?",
+            (project["id"],),
+        ).fetchone()["count"]
         db.execute("DELETE FROM records WHERE container_id = ?", (project["id"],))
+        record_audit_event(
+            db, request,
+            action="store.cleared", object_type="store", object_id=project_id,
+            project_public_id=project_id, project_name=project["name"],
+            summary=f"Cleared {count} Store record{'s' if count != 1 else ''} from '{project['name']}'",
+        )
     return _redirect(f"/dashboard/projects/{project_id}", "Store cleared; schema unlocked", "success")
 
 
@@ -1520,6 +1711,36 @@ def health():
 def stats(request: Request):
     with get_db() as db:
         return _stats_data(db, _request_tutor(request))
+
+
+@app.get("/admin/audit", dependencies=[Depends(require_admin)], tags=["Audit"])
+def get_audit_log(
+    request: Request,
+    limit: Annotated[int, Query(ge=1, le=250)] = 100,
+    before_id: Annotated[int | None, Query(gt=0)] = None,
+    actor: Annotated[str | None, Query(max_length=40)] = None,
+    category: Annotated[str | None, Query(max_length=20)] = None,
+):
+    _require_superadmin_dashboard(request)
+    if category not in {None, "project", "store", "api_key", "tutor", "security"}:
+        raise HTTPException(status_code=422, detail="Invalid audit category")
+    with get_db() as db:
+        rows = list_audit_events(
+            db,
+            limit=limit + 1,
+            before_id=before_id,
+            actor=actor,
+            category=category,
+        )
+        stats_data = audit_stats(db)
+    has_more = len(rows) > limit
+    events = rows[:limit]
+    return {
+        "events": events,
+        "has_more": has_more,
+        "next_before_id": events[-1]["id"] if has_more and events else None,
+        "stats": stats_data,
+    }
 
 
 @app.get("/admin/projects", dependencies=[Depends(require_admin)], tags=["Projects"])
@@ -1562,7 +1783,14 @@ def create_project(request: Request, payload: ProjectCreate):
                 _owner_tutor_id_for_new_project(db, _request_tutor(request)),
             ),
         )
-        return _project_summary(db, cursor.lastrowid)
+        result = _project_summary(db, cursor.lastrowid)
+        record_audit_event(
+            db, request,
+            action="project.created", object_type="project", object_id=public_id,
+            project_public_id=public_id, project_name=payload.name,
+            summary=f"Created Project '{payload.name}' through admin API",
+        )
+        return result
 
 
 @app.get("/admin/projects/{project_id}", dependencies=[Depends(require_admin)], tags=["Projects"])
@@ -1667,6 +1895,15 @@ def update_project(request: Request, project_id: str, payload: ProjectUpdate):
                 project["id"],
             ),
         )
+        updated = db.execute("SELECT * FROM containers WHERE id = ?", (project["id"],)).fetchone()
+        changes = _project_change_labels(project, updated)
+        if changes:
+            record_audit_event(
+                db, request,
+                action="project.updated", object_type="project", object_id=project_id,
+                project_public_id=project_id, project_name=updated["name"],
+                summary=f"Updated Project '{updated['name']}' through admin API ({', '.join(changes)})",
+            )
         return _project_summary(db, project["id"])
 
 
@@ -1690,6 +1927,12 @@ def delete_project(
     with get_db() as db:
         project = _project_or_404(db, project_id, _request_tutor(request))
         internal_id = project["id"]
+        record_audit_event(
+            db, request,
+            action="project.deleted", object_type="project", object_id=project_id,
+            project_public_id=project_id, project_name=project["name"],
+            summary=f"Deleted Project '{project['name']}' through admin API",
+        )
         db.execute("DELETE FROM record_values WHERE container_id = ?", (internal_id,))
         db.execute("DELETE FROM records WHERE container_id = ?", (internal_id,))
         db.execute("DELETE FROM api_keys WHERE container_id = ?", (internal_id,))
@@ -1757,6 +2000,12 @@ def add_field(request: Request, project_id: str, payload: FieldCreate):
                     payload.text_max_length,
                 ),
             )
+            record_audit_event(
+                db, request,
+                action="store.field_added", object_type="store_field", object_id=payload.name,
+                project_public_id=project_id, project_name=project["name"],
+                summary=f"Added {payload.type} Store field '{payload.name}' to '{project['name']}' through admin API",
+            )
         except sqlite3.IntegrityError as exc:
             raise HTTPException(status_code=409, detail="Store field already exists or violates schema constraints") from exc
 
@@ -1809,6 +2058,12 @@ def remove_field(request: Request, project_id: str, field_name: str):
             WHERE container_id = ? AND position > ?
             """,
             (project["id"], field["position"]),
+        )
+        record_audit_event(
+            db, request,
+            action="store.field_removed", object_type="store_field", object_id=field_name,
+            project_public_id=project_id, project_name=project["name"],
+            summary=f"Removed Store field '{field_name}' from '{project['name']}' through admin API",
         )
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -1867,7 +2122,13 @@ def create_key(request: Request, project_id: str, payload: KeyCreate):
                 int(can_write),
             ),
         )
-        key_id = cursor.lastrowid
+        key_id = int(cursor.lastrowid)
+        record_audit_event(
+            db, request,
+            action="api_key.created", object_type="api_key", object_id=key_id,
+            project_public_id=project_id, project_name=project["name"],
+            summary=f"Created API key '{payload.name}' ({payload.permissions}) for '{project['name']}' through admin API",
+        )
 
     return {
         "id": key_id,
@@ -1889,12 +2150,22 @@ def create_key(request: Request, project_id: str, payload: KeyCreate):
 def revoke_key(request: Request, project_id: str, key_id: int):
     with get_db() as db:
         project = _project_or_404(db, project_id, _request_tutor(request))
-        cursor = db.execute(
+        key_row = db.execute(
+            "SELECT name FROM api_keys WHERE id = ? AND container_id = ?",
+            (key_id, project["id"]),
+        ).fetchone()
+        if key_row is None:
+            raise HTTPException(status_code=404, detail="API key not found")
+        db.execute(
             "UPDATE api_keys SET enabled = 0 WHERE id = ? AND container_id = ?",
             (key_id, project["id"]),
         )
-        if cursor.rowcount == 0:
-            raise HTTPException(status_code=404, detail="API key not found")
+        record_audit_event(
+            db, request,
+            action="api_key.revoked", object_type="api_key", object_id=key_id,
+            project_public_id=project_id, project_name=project["name"],
+            summary=f"Revoked API key '{key_row['name']}' for '{project['name']}' through admin API",
+        )
     return {"status": "revoked", "key_id": key_id}
 
 
@@ -1906,12 +2177,22 @@ def revoke_key(request: Request, project_id: str, key_id: int):
 def enable_key(request: Request, project_id: str, key_id: int):
     with get_db() as db:
         project = _project_or_404(db, project_id, _request_tutor(request))
-        cursor = db.execute(
+        key_row = db.execute(
+            "SELECT name FROM api_keys WHERE id = ? AND container_id = ?",
+            (key_id, project["id"]),
+        ).fetchone()
+        if key_row is None:
+            raise HTTPException(status_code=404, detail="API key not found")
+        db.execute(
             "UPDATE api_keys SET enabled = 1 WHERE id = ? AND container_id = ?",
             (key_id, project["id"]),
         )
-        if cursor.rowcount == 0:
-            raise HTTPException(status_code=404, detail="API key not found")
+        record_audit_event(
+            db, request,
+            action="api_key.enabled", object_type="api_key", object_id=key_id,
+            project_public_id=project_id, project_name=project["name"],
+            summary=f"Enabled API key '{key_row['name']}' for '{project['name']}' through admin API",
+        )
     return {"status": "enabled", "key_id": key_id}
 
 
@@ -1941,6 +2222,15 @@ def admin_create_record(
         result = record_response(
             db, result["id"], project["id"], include_creator=True
         )
+        if created or changed:
+            audit_action = "store.record_created" if created else "store.record_updated"
+            verb = "Created" if created else "Updated"
+            record_audit_event(
+                db, request,
+                action=audit_action, object_type="store_record", object_id=result["id"],
+                project_public_id=project_id, project_name=project["name"],
+                summary=f"{verb} Store record #{result['id']} in '{project['name']}' through admin API",
+            )
 
     if not created:
         response.status_code = status.HTTP_200_OK
@@ -1965,13 +2255,20 @@ def admin_update_record(request: Request, project_id: str, record_id: int, recor
         if existing is None:
             raise HTTPException(status_code=404, detail="Store record not found")
 
-        return replace_store_record_admin(
+        result = replace_store_record_admin(
             db,
             record_id,
             project["id"],
             record.root,
             store_config_from_row(project),
         )
+        record_audit_event(
+            db, request,
+            action="store.record_updated", object_type="store_record", object_id=record_id,
+            project_public_id=project_id, project_name=project["name"],
+            summary=f"Updated Store record #{record_id} in '{project['name']}' through admin API",
+        )
+        return result
 
 
 @app.get(
@@ -2032,6 +2329,12 @@ def delete_record(request: Request, project_id: str, record_id: int):
         )
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Store record not found")
+        record_audit_event(
+            db, request,
+            action="store.record_deleted", object_type="store_record", object_id=record_id,
+            project_public_id=project_id, project_name=project["name"],
+            summary=f"Deleted Store record #{record_id} from '{project['name']}' through admin API",
+        )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -2058,5 +2361,11 @@ def clear_records(
             (project["id"],),
         ).fetchone()["count"]
         db.execute("DELETE FROM records WHERE container_id = ?", (project["id"],))
+        record_audit_event(
+            db, request,
+            action="store.cleared", object_type="store", object_id=project_id,
+            project_public_id=project_id, project_name=project["name"],
+            summary=f"Cleared {count} Store record{'s' if count != 1 else ''} from '{project['name']}' through admin API",
+        )
 
     return {"deleted_records": count, "schema_editable": True}

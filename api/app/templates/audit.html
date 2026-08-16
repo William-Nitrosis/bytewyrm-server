@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="split" style="margin-bottom: 1rem; align-items: flex-start;">
+    <div>
+        <div class="page-kicker">The Chronicle</div>
+        <h1 style="margin: .15rem 0 .3rem;">Audit Log</h1>
+        <div class="muted">A bounded record of successful admin changes. Credentials, request bodies and Store payloads are never recorded.</div>
+    </div>
+</div>
+
+<div class="cards" style="margin-bottom: 1rem;">
+    <div class="card"><div class="subtle">Events</div><div class="stat">{{ audit_stats.total }}</div><div class="small muted">All recorded admin changes</div></div>
+    <div class="card"><div class="subtle">Last 24 hours</div><div class="stat">{{ audit_stats.last_24h }}</div><div class="small muted">Recent admin changes</div></div>
+    <div class="card"><div class="subtle">Tutor actors</div><div class="stat">{{ audit_stats.tutor_actors }}</div><div class="small muted">Tutors with recorded actions</div></div>
+    <div class="card"><div class="subtle">Break-glass / CLI</div><div class="stat">{{ audit_stats.break_glass }}</div><div class="small muted">Recovery-path changes</div></div>
+</div>
+
+<section class="panel" style="margin-bottom: 1rem;">
+    <form method="get" action="/dashboard/audit" class="grid grid-3" style="align-items: end;">
+        <div>
+            <label for="actor">Actor</label>
+            <select id="actor" name="actor">
+                <option value="" {% if not selected_actor %}selected{% endif %}>All actors</option>
+                {% for tutor in tutors %}
+                    <option value="{{ tutor.id }}" {% if selected_actor == tutor.id|string %}selected{% endif %}>{{ tutor.display_name or tutor.email }}</option>
+                {% endfor %}
+                <option value="break_glass" {% if selected_actor == 'break_glass' %}selected{% endif %}>Break-glass / CLI</option>
+            </select>
+        </div>
+        <div>
+            <label for="category">Category</label>
+            <select id="category" name="category">
+                <option value="" {% if not selected_category %}selected{% endif %}>All categories</option>
+                <option value="project" {% if selected_category == 'project' %}selected{% endif %}>Projects</option>
+                <option value="store" {% if selected_category == 'store' %}selected{% endif %}>Store</option>
+                <option value="api_key" {% if selected_category == 'api_key' %}selected{% endif %}>API keys</option>
+                <option value="tutor" {% if selected_category == 'tutor' %}selected{% endif %}>Tutors</option>
+                <option value="security" {% if selected_category == 'security' %}selected{% endif %}>Security</option>
+            </select>
+        </div>
+        <div class="actions">
+            <button type="submit">Filter</button>
+            <a href="/dashboard/audit"><button class="secondary" type="button">Reset</button></a>
+        </div>
+    </form>
+</section>
+
+<section class="panel">
+    <div class="split"><h2>Recent activity</h2><span class="muted">Newest first · up to 100 per page</span></div>
+    <div style="overflow-x: auto;">
+        <table>
+            <thead>
+                <tr>
+                    <th>When</th>
+                    <th>Actor</th>
+                    <th>Action</th>
+                    <th>Project</th>
+                    <th>Summary</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for event in audit_events %}
+                <tr>
+                    <td class="small muted nowrap">{{ event.created_at }}</td>
+                    <td>
+                        <strong>{{ event.actor_display_name or event.actor_email }}</strong>
+                        {% if event.actor_display_name %}<div class="muted small">{{ event.actor_email }}</div>{% endif %}
+                        {% if event.access_method == 'cloudflare' %}
+                            <div class="small"><span class="pill good">Access</span></div>
+                        {% elif event.access_method == 'cli' %}
+                            <div class="small"><span class="pill neutral">CLI</span></div>
+                        {% else %}
+                            <div class="small"><span class="pill bad">Break glass</span></div>
+                        {% endif %}
+                    </td>
+                    <td><span class="tool-badge">{{ event.action_label }}</span></td>
+                    <td>
+                        {% if event.project_public_id %}
+                            <strong>{{ event.project_name or 'Project' }}</strong>
+                            <div class="muted small mono">{{ event.project_public_id }}</div>
+                        {% else %}
+                            <span class="muted">—</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {{ event.summary }}
+                        {% if event.object_id %}<div class="muted small mono">{{ event.object_type }}: {{ event.object_id }}</div>{% endif %}
+                    </td>
+                </tr>
+            {% else %}
+                <tr><td colspan="5" class="muted">No audit events match these filters yet.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% if next_url %}
+        <div class="actions" style="margin-top: 1rem;">
+            <a href="{{ next_url }}"><button class="secondary" type="button">Older events</button></a>
+        </div>
+    {% endif %}
+</section>
+{% endblock %}

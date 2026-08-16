@@ -1,5 +1,7 @@
 # ByteWyrm Server
 
+> **v0.13.0:** adds superadmin audit logging for dashboard, admin API, and break-glass CLI changes.
+
 **A tiny, self-hostable backend for small Python game projects.**
 
 ByteWyrm gives beginner programmers a simple way to store and retrieve small amounts of game data without having to build their own web server, database, authentication system, or API.
@@ -640,32 +642,23 @@ Future tools may be added alongside Store where they require genuinely different
 
 ---
 
-## Multi-tutor admin rollout
+## Multi-tutor administration
 
-The hosted admin dashboard validates human identity from Cloudflare Access and
-maps the verified email to ByteWyrm's local `tutors` table. Tutor role and
-Project ownership are then enforced by ByteWyrm itself.
+The hosted admin dashboard uses Cloudflare Access for human authentication and
+ByteWyrm's local `tutors` table for authorization. ByteWyrm cryptographically
+validates the signed Access application JWT before trusting its verified email.
 
-Current authentication behaviour:
+- `superadmin` tutors can manage every Project and tutor account.
+- regular `tutor` accounts can manage only Projects they own.
+- unknown or disabled Cloudflare identities are rejected by ByteWyrm even if
+  they pass the outer Access policy.
+- `ADMIN_TOKEN` is retained only for direct trusted-LAN break-glass access.
 
-- Cloudflare Access JWTs are cryptographically validated by ByteWyrm.
-- The first verified Access identity on a fresh installation is bootstrapped as
-  the ByteWyrm `superadmin`.
-- That bootstrap is one-shot. Once any tutor exists, later unknown Access
-  identities are not automatically created and receive `403`.
-- Enabled Cloudflare-authenticated tutors do not enter or share `ADMIN_TOKEN`.
-- `ADMIN_TOKEN` is retained only for direct/LAN break-glass dashboard sessions
-  and direct LAN admin API calls.
-- Remote sign-out ends the Cloudflare Access session.
-
-Registered tutors can be inspected without modifying them:
+Registered tutors can also be inspected locally:
 
 ```bash
 docker compose exec admin python manage.py list-tutors
 ```
-
-Project ownership and per-tutor authorization are added separately; this step
-does not yet change which Projects an authenticated admin session can access.
 
 
 ## Multi-tutor ownership (v0.11)
@@ -683,9 +676,6 @@ Authorization rules:
 - dashboard totals and traffic are scoped to a regular tutor's own Projects
 - physical database storage information is only shown to superadmin/break-glass access
 
-The shared admin token remains a second gate during this rollout. Tutor
-management and tokenless normal tutor sessions come after ownership isolation
-has been tested.
 ## Tutor management UI (v0.11.1)
 
 Superadmins can now manage ByteWyrm tutor identities from the dashboard at:
@@ -750,3 +740,48 @@ Remote dashboard sign-out redirects to the application-domain Cloudflare Access
 logout endpoint. ByteWyrm also deletes any legacy `bytewyrm_admin_session` cookie
 from Cloudflare-authenticated browsers so the old shared token is not retained
 client-side after upgrading.
+
+## v0.13 audit logging
+
+ByteWyrm records a small explicit audit event for successful administrative
+mutations. The audit log is superadmin-only in the dashboard:
+
+```text
+/dashboard/audit
+```
+
+It records actions such as:
+
+- Project creation, settings changes, enable/disable, and deletion
+- Store schema field creation/removal
+- manual Store record creation, editing, deletion, and clearing
+- API key creation, revocation, and re-enabling
+- tutor creation, role changes, enable/disable, and display-name changes
+- equivalent mutations made through the admin JSON API
+- supported break-glass `manage.py` mutation commands
+
+Each event contains a bounded actor/action/object summary plus optional Project
+identity. ByteWyrm deliberately does **not** serialize request bodies, Store
+record payloads, API-key plaintext, `ADMIN_TOKEN`, Cloudflare JWTs, request
+headers, or arbitrary debug/exception data into the audit table.
+
+Normal Cloudflare-authenticated actions retain a snapshot of the verified tutor
+email/display name and link back to the tutor row. Direct LAN recovery actions
+are labelled `LAN break-glass`, while `manage.py` changes are labelled
+`CLI break-glass`.
+
+The dashboard supports actor/category filters and cursor-style older-event
+paging. Superadmins can also read the log through:
+
+```text
+GET /admin/audit
+```
+
+The schema upgrade from v7 to v8 creates the `audit_events` table and indexes
+in place; existing Projects, Store records, tutors, and API keys are unchanged.
+
+Recent events can also be inspected locally:
+
+```bash
+docker compose exec admin python manage.py audit-log --limit 50
+```

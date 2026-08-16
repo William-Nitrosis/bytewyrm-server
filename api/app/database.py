@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from settings import DATABASE_PATH
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 def connect_db() -> sqlite3.Connection:
@@ -150,6 +150,33 @@ def create_tables() -> None:
                     CHECK(enabled IN (0, 1)),
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 last_seen_at DATETIME
+            );
+
+            CREATE TABLE IF NOT EXISTS audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor_tutor_id INTEGER
+                    REFERENCES tutors(id) ON DELETE SET NULL,
+                actor_email TEXT NOT NULL
+                    CHECK(length(actor_email) BETWEEN 1 AND 254),
+                actor_display_name TEXT
+                    CHECK(actor_display_name IS NULL OR length(actor_display_name) BETWEEN 1 AND 80),
+                actor_role TEXT NOT NULL
+                    CHECK(actor_role IN ('superadmin', 'tutor')),
+                access_method TEXT NOT NULL
+                    CHECK(access_method IN ('cloudflare', 'break_glass', 'cli')),
+                action TEXT NOT NULL
+                    CHECK(length(action) BETWEEN 1 AND 80),
+                object_type TEXT NOT NULL
+                    CHECK(length(object_type) BETWEEN 1 AND 40),
+                object_id TEXT
+                    CHECK(object_id IS NULL OR length(object_id) BETWEEN 1 AND 120),
+                project_public_id TEXT
+                    CHECK(project_public_id IS NULL OR length(project_public_id) BETWEEN 1 AND 80),
+                project_name TEXT
+                    CHECK(project_name IS NULL OR length(project_name) BETWEEN 1 AND 80),
+                summary TEXT NOT NULL
+                    CHECK(length(summary) BETWEEN 1 AND 500),
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
             CREATE TABLE IF NOT EXISTS containers (
@@ -357,6 +384,18 @@ def create_tables() -> None:
                 PRIMARY KEY(key_id, bucket_start),
                 FOREIGN KEY(key_id) REFERENCES api_keys(id) ON DELETE CASCADE
             );
+
+            CREATE INDEX IF NOT EXISTS idx_audit_events_created
+                ON audit_events(id DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_audit_events_actor
+                ON audit_events(actor_tutor_id, id DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_audit_events_project
+                ON audit_events(project_public_id, id DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_audit_events_action
+                ON audit_events(action, id DESC);
 
             CREATE INDEX IF NOT EXISTS idx_api_key_usage_minutes_bucket
                 ON api_key_usage_minutes(bucket_start);

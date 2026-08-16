@@ -238,6 +238,7 @@
                 <a href="/dashboard">Projects</a>
                 {% if not current_tutor or current_tutor.is_superadmin %}
                     <a href="/dashboard/tutors">Tutors</a>
+                    <a href="/dashboard/audit">Audit Log</a>
                 {% endif %}
                 <a href="/docs">Admin API</a>
                 <form class="inline" method="post" action="/logout">
