@@ -397,9 +397,18 @@ The dashboard can:
 - inspect per-key reads, writes, rejected requests, and recent request rates
 - inspect database usage
 
-The admin service uses a separate `ADMIN_TOKEN`.
+The admin service uses a separate `ADMIN_TOKEN`. Direct LAN access can remain bound to a trusted interface. A hosted deployment may additionally publish the dashboard through Cloudflare Tunnel **only when the hostname is protected by Cloudflare Access**.
 
-In the provided deployment it is intended to be bound only to a trusted interface/LAN and is deliberately isolated from the public tunnel network.
+When Cloudflare Access identity support is configured, ByteWyrm validates the signed `Cf-Access-Jwt-Assertion` application token against the Access team's public keys, issuer and application audience before trusting the verified email claim. During the current rollout the existing `ADMIN_TOKEN` remains a second gate.
+
+Configure the admin container with:
+
+```dotenv
+CLOUDFLARE_ACCESS_TEAM_DOMAIN=https://your-team.cloudflareaccess.com
+CLOUDFLARE_ACCESS_AUD=your_application_audience_tag
+```
+
+These settings are optional for LAN-only/self-hosted deployments that do not use Cloudflare Access.
 
 ---
 
@@ -628,3 +637,83 @@ The current focus is keeping the system:
 - easy for tutors or self-hosters to control
 
 Future tools may be added alongside Store where they require genuinely different backend behaviour, while features that can naturally be expressed through Store remain part of Store.
+
+---
+
+## Multi-tutor admin rollout
+
+The hosted admin dashboard can validate human identity from Cloudflare Access.
+ByteWyrm then persists that verified identity in its own `tutors` table so
+future authorization can be based on a local tutor account rather than a
+shared admin secret.
+
+The rollout is intentionally staged. In the current identity-persistence step:
+
+- Cloudflare Access JWTs are cryptographically validated by ByteWyrm.
+- The first verified Access identity on a fresh installation is bootstrapped as
+  the ByteWyrm `superadmin`.
+- That bootstrap is one-shot. Once any tutor exists, later unknown Access
+  identities are not automatically created.
+- Existing `ADMIN_TOKEN` browser/API authentication remains in place as a
+  second gate while multi-tutor authorization is being built.
+- Direct LAN access continues to work without a Cloudflare identity and remains
+  the break-glass path.
+
+Registered tutors can be inspected without modifying them:
+
+```bash
+docker compose exec admin python manage.py list-tutors
+```
+
+Project ownership and per-tutor authorization are added separately; this step
+does not yet change which Projects an authenticated admin session can access.
+
+
+## Multi-tutor ownership (v0.11)
+
+Projects are now linked to a ByteWyrm tutor owner. Existing Projects are
+assigned to the bootstrapped superadmin during the schema v6 -> v7 upgrade.
+
+Authorization rules:
+
+- superadmins can see and manage every Project
+- regular tutors can see and manage only Projects they own
+- another tutor's Project returns `404 Project not found`
+- direct LAN access with `ADMIN_TOKEN` remains unrestricted as a break-glass path
+- a Cloudflare-authenticated identity must map to an enabled ByteWyrm tutor
+- dashboard totals and traffic are scoped to a regular tutor's own Projects
+- physical database storage information is only shown to superadmin/break-glass access
+
+The shared admin token remains a second gate during this rollout. Tutor
+management and tokenless normal tutor sessions come after ownership isolation
+has been tested.
+## Tutor management UI (v0.11.1)
+
+Superadmins can now manage ByteWyrm tutor identities from the dashboard at:
+
+```text
+/dashboard/tutors
+```
+
+The tutor manager can:
+
+- add an exact Cloudflare-verified email to the ByteWyrm allowlist
+- set an optional display name
+- grant `tutor` or `superadmin` role
+- enable or disable an account
+- inspect last-seen time and Project counts
+- open a tutor and inspect the Projects they own
+
+Regular tutors cannot see or access tutor-management routes. Direct-LAN
+break-glass admin sessions retain superadmin-equivalent access. ByteWyrm refuses
+to remove the final enabled superadmin and prevents a logged-in superadmin from
+disabling or demoting their own account through the dashboard.
+
+Email addresses are the immutable local identity key used to match a verified
+Cloudflare Access identity. If a tutor's email changes, add the new identity
+rather than editing the existing email.
+
+Adding a tutor to ByteWyrm does not grant access through Cloudflare by itself;
+the identity must still satisfy the Cloudflare Access policy protecting the
+admin hostname.
+

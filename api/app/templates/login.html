@@ -3,7 +3,19 @@
 <div style="max-width: 520px; margin: 3rem auto;">
     <div class="panel">
         <div class="page-kicker">ByteWyrm</div><h1 style="margin:.15rem 0 .35rem;">Enter the Hoard</h1>
-        <p class="muted">Enter the admin bearer token from your <code>.env</code> file to access the private ByteWyrm dashboard.</p>
+        {% if access_identity %}
+            <div class="notice success" style="margin-top:.8rem;">
+                Cloudflare Access verified <strong>{{ access_identity.email }}</strong>.
+                {% if current_tutor %}
+                    ByteWyrm knows this account as <strong>{{ current_tutor.role }}</strong>.
+                {% else %}
+                    This identity is not registered as a ByteWyrm tutor yet.
+                {% endif %}
+            </div>
+            <p class="muted">During the multi-tutor rollout, the existing admin token is still required as a second gate.</p>
+        {% else %}
+            <p class="muted">Enter the admin bearer token from your <code>.env</code> file to access the private ByteWyrm dashboard.</p>
+        {% endif %}
         <form class="stacked" method="post" action="/login">
             <input type="hidden" name="next_path" value="{{ next }}">
             <div>

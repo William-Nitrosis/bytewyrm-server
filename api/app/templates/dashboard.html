@@ -13,11 +13,13 @@
     <div class="card"><div class="subtle">Store records</div><div class="stat">{{ stats.store_records }}</div><div class="small muted">Stored in Project Stores</div></div>
     <div class="card"><div class="subtle">API Keys</div><div class="stat">{{ stats['keys'] }}</div><div class="small muted">{{ stats.enabled_keys }} enabled</div></div>
     <div class="card"><div class="subtle">Traffic this minute</div><div class="stat">{{ stats.current_traffic.requests }}</div><div class="small muted">R{{ stats.current_traffic.reads }} · W{{ stats.current_traffic.writes }} · {{ stats.current_traffic.rejected }} rejected</div></div>
+    {% if stats.database %}
     <div class="card">
         <div class="subtle">Database used</div>
         <div class="stat">{{ human_bytes(stats.database.used_bytes) }}</div>
         <div class="small muted">{{ human_bytes(stats.database.reusable_bytes) }} reusable · {{ human_bytes(stats.database.allocated_bytes) }} allocated</div>
     </div>
+    {% endif %}
 </div>
 
 <div class="grid grid-2 dashboard-main">
@@ -31,6 +33,9 @@
                             <div>
                                 <a href="/dashboard/projects/{{ project.id }}"><strong>{{ project.name }}</strong></a>
                                 <div class="muted small mono">{{ project.id }}</div>
+                                {% if not current_tutor or current_tutor.is_superadmin %}
+                                    <div class="muted small">owner: {{ project.owner.email if project.owner else 'unowned' }}</div>
+                                {% endif %}
                             </div>
                             {% if project.enabled %}
                                 <span class="pill good">● Active</span>
@@ -97,6 +102,7 @@
             </div>
             <button type="submit">Create project</button>
         </form>
+        {% if stats.database %}
         <div class="card" style="margin-top:1rem; background: rgba(2,6,23,.3);">
             <strong>Hoard storage</strong>
             <div class="kv small" style="margin-top:.55rem;">
@@ -112,6 +118,7 @@
                 SQLite keeps deleted pages ready for reuse, so the physical file may stay the same size after deleting data. "Used pages" shows the more useful live figure.
             </div>
         </div>
+        {% endif %}
     </aside>
 </div>
 {% endblock %}

@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="split" style="margin-bottom: 1rem;">
+    <div>
+        <div class="page-kicker">The Keepers</div>
+        <h1 style="margin: .15rem 0 .3rem;">Tutors</h1>
+        <div class="muted">Control who ByteWyrm recognises after Cloudflare Access verifies their email.</div>
+    </div>
+</div>
+
+<div class="cards" style="margin-bottom: 1rem;">
+    <div class="card"><div class="subtle">Tutors</div><div class="stat">{{ tutor_stats.total }}</div><div class="small muted">{{ tutor_stats.enabled }} enabled</div></div>
+    <div class="card"><div class="subtle">Superadmins</div><div class="stat">{{ tutor_stats.superadmins }}</div><div class="small muted">Can manage every Project and tutor</div></div>
+    <div class="card"><div class="subtle">Owned Projects</div><div class="stat">{{ tutor_stats.projects }}</div><div class="small muted">Across registered tutors</div></div>
+</div>
+
+<div class="grid grid-2 dashboard-main">
+    <section class="panel">
+        <div class="split"><h2>Registered tutors</h2><span class="muted">{{ tutors|length }} total</span></div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Tutor</th>
+                    <th>Role</th>
+                    <th>Status</th>
+                    <th>Projects</th>
+                    <th>Last seen</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for tutor in tutors %}
+                <tr>
+                    <td>
+                        <strong>{{ tutor.display_name or tutor.email }}</strong>
+                        {% if tutor.display_name %}<div class="muted small">{{ tutor.email }}</div>{% endif %}
+                    </td>
+                    <td>
+                        {% if tutor.role == 'superadmin' %}<span class="pill neutral">Superadmin</span>{% else %}<span class="tool-badge">Tutor</span>{% endif %}
+                    </td>
+                    <td>
+                        {% if tutor.enabled %}<span class="pill good">● Enabled</span>{% else %}<span class="pill bad">● Disabled</span>{% endif %}
+                    </td>
+                    <td>{{ tutor.project_count }}</td>
+                    <td class="small muted">{{ tutor.last_seen_at or 'Never' }}</td>
+                    <td class="nowrap"><a href="/dashboard/tutors/{{ tutor.id }}"><button class="secondary" type="button">Open</button></a></td>
+                </tr>
+            {% else %}
+                <tr><td colspan="6" class="muted">No tutors registered.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </section>
+
+    <aside class="panel">
+        <h2>Add tutor</h2>
+        <p class="muted small">Add the exact email Cloudflare Access will verify. The tutor can sign in once your Access policy also allows them.</p>
+        <form class="stacked" method="post" action="/dashboard/tutors">
+            <div>
+                <label for="email">Email</label>
+                <input id="email" name="email" type="email" required maxlength="254" placeholder="tutor@example.com" autocomplete="off">
+            </div>
+            <div>
+                <label for="display_name">Display name <span class="muted small">(optional)</span></label>
+                <input id="display_name" name="display_name" maxlength="80" placeholder="Alex Smith" autocomplete="off">
+            </div>
+            <div>
+                <label for="role">Role</label>
+                <select id="role" name="role">
+                    <option value="tutor" selected>Tutor — own Projects only</option>
+                    <option value="superadmin">Superadmin — everything</option>
+                </select>
+            </div>
+            <button type="submit">Add tutor</button>
+        </form>
+        <div class="notice info" style="margin-top: 1rem; margin-bottom: 0;">
+            Adding a tutor here does not bypass Cloudflare Access. They must pass both Cloudflare's policy and ByteWyrm's tutor allowlist.
+        </div>
+    </aside>
+</div>
+{% endblock %}

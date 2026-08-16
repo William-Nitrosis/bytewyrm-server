@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="split" style="margin-bottom: 1rem; align-items: flex-start;">
+    <div>
+        <div class="page-kicker">Tutor account</div>
+        <h1 style="margin: .15rem 0 .25rem;">{{ managed_tutor.display_name or managed_tutor.email }}</h1>
+        {% if managed_tutor.display_name %}<div class="muted mono">{{ managed_tutor.email }}</div>{% endif %}
+    </div>
+    <div class="actions">
+        {% if managed_tutor.enabled %}<span class="pill good">● Enabled</span>{% else %}<span class="pill bad">● Disabled</span>{% endif %}
+        {% if managed_tutor.role == 'superadmin' %}<span class="pill neutral">Superadmin</span>{% else %}<span class="tool-badge">Tutor</span>{% endif %}
+        <a href="/dashboard/tutors"><button class="secondary" type="button">Back to tutors</button></a>
+    </div>
+</div>
+
+<div class="grid grid-2" style="margin-bottom: 1rem;">
+    <section class="panel">
+        <h2>Account</h2>
+        <div class="kv small" style="margin-bottom: 1rem;">
+            <div class="muted">Email identity</div><div class="mono">{{ managed_tutor.email }}</div>
+            <div class="muted">Created</div><div>{{ managed_tutor.created_at }}</div>
+            <div class="muted">Last seen</div><div>{{ managed_tutor.last_seen_at or 'Never' }}</div>
+            <div class="muted">Projects</div><div>{{ managed_tutor.project_count }} total · {{ managed_tutor.enabled_project_count }} enabled</div>
+        </div>
+        <div class="notice info">
+            The email is the Cloudflare identity key and cannot be edited. If someone's account email changes, add the new identity instead.
+        </div>
+    </section>
+
+    <section class="panel">
+        <h2>Tutor settings</h2>
+        <form class="stacked" method="post" action="/dashboard/tutors/{{ managed_tutor.id }}/settings">
+            <div>
+                <label for="display_name">Display name</label>
+                <input id="display_name" name="display_name" maxlength="80" value="{{ managed_tutor.display_name or '' }}" placeholder="Optional friendly name">
+            </div>
+            <div>
+                <label for="role">Role</label>
+                <select id="role" name="role">
+                    <option value="tutor" {% if managed_tutor.role == 'tutor' %}selected{% endif %}>Tutor — own Projects only</option>
+                    <option value="superadmin" {% if managed_tutor.role == 'superadmin' %}selected{% endif %}>Superadmin — everything</option>
+                </select>
+            </div>
+            <label class="checkbox-row"><input type="checkbox" name="enabled" {% if managed_tutor.enabled %}checked{% endif %}> Enabled</label>
+            <button type="submit">Save tutor settings</button>
+        </form>
+        {% if current_tutor and current_tutor.id == managed_tutor.id %}
+            <div class="muted small" style="margin-top: .8rem;">Your own dashboard account cannot disable or demote itself.</div>
+        {% endif %}
+    </section>
+</div>
+
+<section class="panel">
+    <div class="split"><h2>Projects</h2><span class="muted">{{ projects|length }} owned</span></div>
+    <div class="container-list">
+        {% for project in projects %}
+            <div class="card container-card">
+                <div>
+                    <div class="split">
+                        <div>
+                            <a href="/dashboard/projects/{{ project.id }}"><strong>{{ project.name }}</strong></a>
+                            <div class="muted small mono">{{ project.id }}</div>
+                        </div>
+                        {% if project.enabled %}<span class="pill good">● Active</span>{% else %}<span class="pill bad">● Disabled</span>{% endif %}
+                    </div>
+                    <div class="container-meta">
+                        <span><span class="tool-badge">Store</span> {{ project.tools.store.field_count }} fields</span>
+                        <span>{{ project.tools.store.record_count }} / {{ project.tools.store.max_records }} records</span>
+                        <span>{{ project['keys']['enabled'] }} / {{ project['keys']['total'] }} keys enabled</span>
+                    </div>
+                </div>
+                <div class="actions"><a href="/dashboard/projects/{{ project.id }}"><button type="button">Open</button></a></div>
+            </div>
+        {% else %}
+            <div class="card"><strong>No Projects yet.</strong><div class="muted small">This tutor will own Projects they create after signing in.</div></div>
+        {% endfor %}
+    </div>
+</section>
+{% endblock %}

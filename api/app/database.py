@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from settings import DATABASE_PATH
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
 
 
 def connect_db() -> sqlite3.Connection:
@@ -138,6 +138,20 @@ def create_tables() -> None:
                 value TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS tutors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL COLLATE NOCASE UNIQUE
+                    CHECK(length(email) BETWEEN 3 AND 254),
+                display_name TEXT
+                    CHECK(display_name IS NULL OR length(display_name) BETWEEN 1 AND 80),
+                role TEXT NOT NULL DEFAULT 'tutor'
+                    CHECK(role IN ('superadmin', 'tutor')),
+                enabled INTEGER NOT NULL DEFAULT 1
+                    CHECK(enabled IN (0, 1)),
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_seen_at DATETIME
+            );
+
             CREATE TABLE IF NOT EXISTS containers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 public_id TEXT NOT NULL UNIQUE,
@@ -165,6 +179,8 @@ def create_tables() -> None:
                     CHECK(read_rate_limit BETWEEN 1 AND 10000),
                 write_rate_limit INTEGER NOT NULL DEFAULT 20
                     CHECK(write_rate_limit BETWEEN 1 AND 10000),
+                owner_tutor_id INTEGER
+                    REFERENCES tutors(id) ON DELETE RESTRICT,
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
@@ -373,6 +389,31 @@ def create_tables() -> None:
             CREATE INDEX IF NOT EXISTS idx_record_values_text_query
                 ON record_values(container_id, field_id, text_value, record_id);
             """
+        )
+
+        # v0.11: Projects now have an owning tutor. Existing databases add a
+        # nullable foreign-key column in place; normal tutor-created Projects
+        # always receive an owner. Legacy/orphaned Projects are claimed by the
+        # bootstrapped superadmin when one exists.
+        _add_column_if_missing(
+            db,
+            "containers",
+            "owner_tutor_id",
+            "INTEGER REFERENCES tutors(id) ON DELETE RESTRICT",
+        )
+
+        superadmin = db.execute(
+            "SELECT id FROM tutors WHERE role = 'superadmin' ORDER BY id LIMIT 1"
+        ).fetchone()
+        if superadmin is not None:
+            db.execute(
+                "UPDATE containers SET owner_tutor_id = ? WHERE owner_tutor_id IS NULL",
+                (superadmin["id"],),
+            )
+
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_containers_owner_tutor_id "
+            "ON containers(owner_tutor_id, id DESC)"
         )
 
         db.execute(

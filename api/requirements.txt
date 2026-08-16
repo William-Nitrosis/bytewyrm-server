@@ -2,3 +2,4 @@ fastapi
 uvicorn[standard]
 jinja2
 python-multipart
+PyJWT[crypto]>=2.10,<3

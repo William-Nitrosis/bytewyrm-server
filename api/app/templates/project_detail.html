@@ -5,6 +5,9 @@
         <div class="muted small"><a href="/dashboard">← Back to dashboard</a></div>
         <div class="page-kicker">Project</div><h1 style="margin: .15rem 0 .3rem;">{{ project.name }}</h1>
         <div class="muted mono">{{ project.id }}</div>
+        {% if not current_tutor or current_tutor.is_superadmin %}
+            <div class="muted small" style="margin-top:.25rem;">Owner: {{ project.owner.email if project.owner else 'unowned' }}</div>
+        {% endif %}
     </div>
     <div>
         {% if project.enabled %}

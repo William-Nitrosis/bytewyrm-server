@@ -10,6 +10,11 @@ from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 
 from admin_auth import SESSION_COOKIE_NAME, is_valid_admin_token, require_admin, require_admin_session
+from cloudflare_access import (
+    CloudflareAccessInvalidToken,
+    CloudflareAccessNotConfigured,
+    cloudflare_access,
+)
 from admin_models import ProjectCreate, ProjectUpdate, FieldCreate, KeyCreate
 from models import StoreRecord
 from auth import hash_api_key
@@ -25,9 +30,17 @@ from store_engine import (
 from schema import load_container_schema, public_schema
 from settings import DATABASE_PATH, MAX_FIELDS_PER_CONTAINER
 from usage import current_bucket_start, key_usage_summary, project_live_usage
+from tutors import (
+    Tutor,
+    count_enabled_superadmins,
+    get_superadmin,
+    get_tutor_by_id,
+    normalize_tutor_email,
+    resolve_tutor_for_access_identity,
+)
 
 
-APP_VERSION = "0.10.0"
+APP_VERSION = "0.11.2"
 ADMIN_MAX_REQUEST_SIZE = 16 * 1024
 PROJECT_ID_PREFIX = "prj_"
 API_KEY_PREFIX = "bwk_"
@@ -59,14 +72,95 @@ def _new_api_key() -> str:
     return API_KEY_PREFIX + secrets.token_urlsafe(32)
 
 
-def _project_or_404(db: sqlite3.Connection, public_id: str) -> sqlite3.Row:
+def _request_tutor(request: Request) -> Tutor | None:
+    """Return the verified tutor, or None for direct LAN break-glass access."""
+    return getattr(request.state, "bytewyrm_tutor", None)
+
+
+def _is_unrestricted_admin(tutor: Tutor | None) -> bool:
+    return tutor is None or tutor.is_superadmin
+
+
+def _require_superadmin_dashboard(request: Request) -> Tutor | None:
+    """Allow superadmins and direct-LAN break-glass sessions only."""
+    tutor = _request_tutor(request)
+    if tutor is not None and not tutor.is_superadmin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Superadmin access required",
+        )
+    return tutor
+
+
+def _tutor_admin_summary(db: sqlite3.Connection, tutor_id: int) -> dict[str, Any]:
     row = db.execute(
-        "SELECT * FROM containers WHERE public_id = ?",
-        (public_id,),
+        """
+        SELECT
+            t.id, t.email, t.display_name, t.role, t.enabled,
+            t.created_at, t.last_seen_at,
+            COUNT(c.id) AS project_count,
+            COALESCE(SUM(CASE WHEN c.enabled = 1 THEN 1 ELSE 0 END), 0) AS enabled_project_count
+        FROM tutors AS t
+        LEFT JOIN containers AS c ON c.owner_tutor_id = t.id
+        WHERE t.id = ?
+        GROUP BY t.id
+        """,
+        (tutor_id,),
     ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Tutor not found")
+    return {
+        "id": row["id"],
+        "email": row["email"],
+        "display_name": row["display_name"],
+        "role": row["role"],
+        "enabled": bool(row["enabled"]),
+        "created_at": row["created_at"],
+        "last_seen_at": row["last_seen_at"],
+        "project_count": row["project_count"],
+        "enabled_project_count": row["enabled_project_count"],
+    }
+
+
+def _list_tutors_admin_data(db: sqlite3.Connection) -> list[dict[str, Any]]:
+    ids = db.execute("SELECT id FROM tutors ORDER BY email COLLATE NOCASE").fetchall()
+    return [_tutor_admin_summary(db, row["id"]) for row in ids]
+
+
+def _project_or_404(
+    db: sqlite3.Connection,
+    public_id: str,
+    tutor: Tutor | None,
+) -> sqlite3.Row:
+    if _is_unrestricted_admin(tutor):
+        row = db.execute(
+            "SELECT * FROM containers WHERE public_id = ?",
+            (public_id,),
+        ).fetchone()
+    else:
+        row = db.execute(
+            "SELECT * FROM containers WHERE public_id = ? AND owner_tutor_id = ?",
+            (public_id, tutor.id),
+        ).fetchone()
+
+    # 404 avoids disclosing that another tutor's Project exists.
     if row is None:
         raise HTTPException(status_code=404, detail="Project not found")
     return row
+
+
+def _owner_tutor_id_for_new_project(
+    db: sqlite3.Connection,
+    tutor: Tutor | None,
+) -> int | None:
+    if tutor is not None:
+        return tutor.id
+
+    # LAN/break-glass creation belongs to the superadmin once one exists. A
+    # LAN-only self-host may have no tutor yet; that Project will be claimed
+    # automatically if a superadmin is bootstrapped later.
+    superadmin = get_superadmin(db)
+    return superadmin.id if superadmin is not None else None
 
 
 def _schema_is_editable(db: sqlite3.Connection, project_id: int) -> bool:
@@ -98,7 +192,9 @@ def _project_summary(db: sqlite3.Connection, project_id: int) -> dict[str, Any]:
             (SELECT COUNT(*) FROM records r WHERE r.container_id = c.id) AS record_count,
             (SELECT COUNT(*) FROM container_fields f WHERE f.container_id = c.id) AS field_count,
             (SELECT COUNT(*) FROM api_keys k WHERE k.container_id = c.id) AS key_count,
-            (SELECT COUNT(*) FROM api_keys k WHERE k.container_id = c.id AND k.enabled = 1) AS enabled_key_count
+            (SELECT COUNT(*) FROM api_keys k WHERE k.container_id = c.id AND k.enabled = 1) AS enabled_key_count,
+            (SELECT email FROM tutors t WHERE t.id = c.owner_tutor_id) AS owner_email,
+            (SELECT display_name FROM tutors t WHERE t.id = c.owner_tutor_id) AS owner_display_name
         FROM containers AS c
         WHERE c.id = ?
         """,
@@ -110,6 +206,15 @@ def _project_summary(db: sqlite3.Connection, project_id: int) -> dict[str, Any]:
         "name": row["name"],
         "enabled": bool(row["enabled"]),
         "created_at": row["created_at"],
+        "owner": (
+            {
+                "id": row["owner_tutor_id"],
+                "email": row["owner_email"],
+                "display_name": row["owner_display_name"],
+            }
+            if row["owner_tutor_id"] is not None
+            else None
+        ),
         "keys": {
             "total": row["key_count"],
             "enabled": row["enabled_key_count"],
@@ -137,20 +242,39 @@ def _project_summary(db: sqlite3.Connection, project_id: int) -> dict[str, Any]:
         "usage": project_live_usage(db, project_id),
     }
 
-def _global_live_usage(db: sqlite3.Connection) -> dict[str, int]:
+def _global_live_usage(
+    db: sqlite3.Connection,
+    tutor: Tutor | None,
+) -> dict[str, int]:
     bucket = current_bucket_start()
-    row = db.execute(
-        """
-        SELECT
-            COALESCE(SUM(reads), 0) AS reads,
-            COALESCE(SUM(writes), 0) AS writes,
-            COALESCE(SUM(rejected), 0) AS rejected,
-            COALESCE(SUM(rate_limited), 0) AS rate_limited
-        FROM api_key_usage_minutes
-        WHERE bucket_start = ?
-        """,
-        (bucket,),
-    ).fetchone()
+    if _is_unrestricted_admin(tutor):
+        row = db.execute(
+            """
+            SELECT
+                COALESCE(SUM(reads), 0) AS reads,
+                COALESCE(SUM(writes), 0) AS writes,
+                COALESCE(SUM(rejected), 0) AS rejected,
+                COALESCE(SUM(rate_limited), 0) AS rate_limited
+            FROM api_key_usage_minutes
+            WHERE bucket_start = ?
+            """,
+            (bucket,),
+        ).fetchone()
+    else:
+        row = db.execute(
+            """
+            SELECT
+                COALESCE(SUM(m.reads), 0) AS reads,
+                COALESCE(SUM(m.writes), 0) AS writes,
+                COALESCE(SUM(m.rejected), 0) AS rejected,
+                COALESCE(SUM(m.rate_limited), 0) AS rate_limited
+            FROM api_key_usage_minutes AS m
+            JOIN api_keys AS k ON k.id = m.key_id
+            JOIN containers AS c ON c.id = k.container_id
+            WHERE m.bucket_start = ? AND c.owner_tutor_id = ?
+            """,
+            (bucket, tutor.id),
+        ).fetchone()
     return {
         "reads": row["reads"],
         "writes": row["writes"],
@@ -160,61 +284,83 @@ def _global_live_usage(db: sqlite3.Connection) -> dict[str, int]:
     }
 
 
-def _stats_data(db: sqlite3.Connection) -> dict[str, Any]:
-    row = db.execute(
-        """
-        SELECT
-            (SELECT COUNT(*) FROM containers) AS projects,
-            (SELECT COUNT(*) FROM containers WHERE enabled = 1) AS enabled_projects,
-            (SELECT COUNT(*) FROM container_fields) AS store_fields,
-            (SELECT COUNT(*) FROM records) AS store_records,
-            (SELECT COUNT(*) FROM api_keys) AS keys,
-            (SELECT COUNT(*) FROM api_keys WHERE enabled = 1) AS enabled_keys
-        """
-    ).fetchone()
+def _stats_data(db: sqlite3.Connection, tutor: Tutor | None) -> dict[str, Any]:
+    if _is_unrestricted_admin(tutor):
+        row = db.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM containers) AS projects,
+                (SELECT COUNT(*) FROM containers WHERE enabled = 1) AS enabled_projects,
+                (SELECT COUNT(*) FROM container_fields) AS store_fields,
+                (SELECT COUNT(*) FROM records) AS store_records,
+                (SELECT COUNT(*) FROM api_keys) AS keys,
+                (SELECT COUNT(*) FROM api_keys WHERE enabled = 1) AS enabled_keys
+            """
+        ).fetchone()
+    else:
+        row = db.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM containers c WHERE c.owner_tutor_id = ?) AS projects,
+                (SELECT COUNT(*) FROM containers c WHERE c.owner_tutor_id = ? AND c.enabled = 1) AS enabled_projects,
+                (SELECT COUNT(*) FROM container_fields f JOIN containers c ON c.id = f.container_id WHERE c.owner_tutor_id = ?) AS store_fields,
+                (SELECT COUNT(*) FROM records r JOIN containers c ON c.id = r.container_id WHERE c.owner_tutor_id = ?) AS store_records,
+                (SELECT COUNT(*) FROM api_keys k JOIN containers c ON c.id = k.container_id WHERE c.owner_tutor_id = ?) AS keys,
+                (SELECT COUNT(*) FROM api_keys k JOIN containers c ON c.id = k.container_id WHERE c.owner_tutor_id = ? AND k.enabled = 1) AS enabled_keys
+            """,
+            (tutor.id, tutor.id, tutor.id, tutor.id, tutor.id, tutor.id),
+        ).fetchone()
 
-    def size(path: Path) -> int:
-        try:
-            return path.stat().st_size
-        except FileNotFoundError:
-            return 0
-
-    wal_path = Path(str(DATABASE_PATH) + "-wal")
-    shm_path = Path(str(DATABASE_PATH) + "-shm")
-
-    # SQLite normally keeps freed pages inside the database file so they can be
-    # reused by future writes.  The physical file therefore does not shrink
-    # just because Projects or Store records are deleted.  These PRAGMAs let
-    # the dashboard distinguish allocated space from pages currently in use.
-    page_size = db.execute("PRAGMA page_size").fetchone()[0]
-    page_count = db.execute("PRAGMA page_count").fetchone()[0]
-    freelist_count = db.execute("PRAGMA freelist_count").fetchone()[0]
-    allocated_bytes = page_size * page_count
-    reusable_bytes = page_size * freelist_count
-    used_bytes = max(0, allocated_bytes - reusable_bytes)
-
-    return {
+    result: dict[str, Any] = {
         "projects": row["projects"],
         "enabled_projects": row["enabled_projects"],
         "store_fields": row["store_fields"],
         "store_records": row["store_records"],
         "keys": row["keys"],
         "enabled_keys": row["enabled_keys"],
-        "current_traffic": _global_live_usage(db),
-        "database": {
+        "current_traffic": _global_live_usage(db, tutor),
+        "database": None,
+    }
+
+    if _is_unrestricted_admin(tutor):
+        def size(path: Path) -> int:
+            try:
+                return path.stat().st_size
+            except FileNotFoundError:
+                return 0
+
+        wal_path = Path(str(DATABASE_PATH) + "-wal")
+        shm_path = Path(str(DATABASE_PATH) + "-shm")
+        page_size = db.execute("PRAGMA page_size").fetchone()[0]
+        page_count = db.execute("PRAGMA page_count").fetchone()[0]
+        freelist_count = db.execute("PRAGMA freelist_count").fetchone()[0]
+        allocated_bytes = page_size * page_count
+        reusable_bytes = page_size * freelist_count
+        used_bytes = max(0, allocated_bytes - reusable_bytes)
+        result["database"] = {
             "path": str(DATABASE_PATH),
-            # Retained for API compatibility with the previous dashboard.
             "database_bytes": size(DATABASE_PATH),
             "used_bytes": used_bytes,
             "allocated_bytes": allocated_bytes,
             "reusable_bytes": reusable_bytes,
             "wal_bytes": size(wal_path),
             "shm_bytes": size(shm_path),
-        },
-    }
+        }
 
-def _list_projects_data(db: sqlite3.Connection) -> list[dict[str, Any]]:
-    ids = db.execute("SELECT id FROM containers ORDER BY id DESC").fetchall()
+    return result
+
+
+def _list_projects_data(
+    db: sqlite3.Connection,
+    tutor: Tutor | None,
+) -> list[dict[str, Any]]:
+    if _is_unrestricted_admin(tutor):
+        ids = db.execute("SELECT id FROM containers ORDER BY id DESC").fetchall()
+    else:
+        ids = db.execute(
+            "SELECT id FROM containers WHERE owner_tutor_id = ? ORDER BY id DESC",
+            (tutor.id,),
+        ).fetchall()
     return [_project_summary(db, row["id"]) for row in ids]
 
 
@@ -302,6 +448,10 @@ def _base_context(request: Request, **extra: Any) -> dict[str, Any]:
         "app_version": APP_VERSION,
         "message": message,
         "message_level": level,
+        "access_identity": getattr(
+            request.state, "cloudflare_access_identity", None
+        ),
+        "current_tutor": getattr(request.state, "bytewyrm_tutor", None),
     }
     context.update(extra)
     return context
@@ -448,10 +598,11 @@ def _validated_store_behavior_update(
 def _project_detail_context(
     db: sqlite3.Connection,
     public_id: str,
+    tutor: Tutor | None,
     *,
     store_before_id: int | None = None,
 ) -> dict[str, Any]:
-    project = _project_or_404(db, public_id)
+    project = _project_or_404(db, public_id, tutor)
     summary = _project_summary(db, project["id"])
     fields = load_container_schema(db, project["id"])
     schema_public = public_schema(fields)
@@ -473,6 +624,43 @@ def _project_detail_context(
         },
         "raw_project": project,
     }
+
+
+@app.middleware("http")
+async def resolve_cloudflare_access_identity(request: Request, call_next):
+    """Verify Cloudflare Access identity when the tunnel supplies a JWT.
+
+    Direct LAN requests intentionally have no Access JWT and continue through
+    without an identity during the multi-tutor rollout. If a JWT is present,
+    however, ByteWyrm validates its signature, issuer, audience and lifetime
+    before trusting the email claim.
+    """
+    request.state.bytewyrm_tutor = None
+    try:
+        identity = cloudflare_access.identity_from_request(request)
+        request.state.cloudflare_access_identity = identity
+        if identity is not None:
+            with get_db() as db:
+                request.state.bytewyrm_tutor = resolve_tutor_for_access_identity(
+                    db, identity
+                )
+    except CloudflareAccessNotConfigured:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "detail": (
+                    "Cloudflare Access reached ByteWyrm, but identity validation "
+                    "is not configured on the admin service"
+                )
+            },
+        )
+    except CloudflareAccessInvalidToken:
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={"detail": "Invalid Cloudflare Access identity"},
+        )
+
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -538,6 +726,19 @@ def login_submit(
     if not is_valid_admin_token(admin_token):
         return _redirect(f"/login?next={next_path}", "Invalid admin token", "error")
 
+    identity = getattr(request.state, "cloudflare_access_identity", None)
+    tutor = _request_tutor(request)
+    if identity is not None and tutor is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This Cloudflare account is not registered as a ByteWyrm tutor",
+        )
+    if tutor is not None and not tutor.enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This ByteWyrm tutor account is disabled",
+        )
+
     response = RedirectResponse(next_path, status_code=status.HTTP_303_SEE_OTHER)
     response.set_cookie(
         SESSION_COOKIE_NAME,
@@ -559,9 +760,10 @@ def logout_submit():
 
 @app.get("/dashboard", response_class=HTMLResponse, dependencies=[Depends(require_admin_session)], include_in_schema=False)
 def dashboard(request: Request):
+    tutor = _request_tutor(request)
     with get_db() as db:
-        stats = _stats_data(db)
-        projects = _list_projects_data(db)
+        stats = _stats_data(db, tutor)
+        projects = _list_projects_data(db, tutor)
     return TEMPLATES.TemplateResponse(
         request,
         "dashboard.html",
@@ -575,6 +777,156 @@ def dashboard(request: Request):
     )
 
 
+@app.get("/dashboard/tutors", response_class=HTMLResponse, dependencies=[Depends(require_admin_session)], include_in_schema=False)
+def dashboard_tutors(request: Request):
+    _require_superadmin_dashboard(request)
+    with get_db() as db:
+        tutors = _list_tutors_admin_data(db)
+        stats = {
+            "total": len(tutors),
+            "enabled": sum(1 for tutor in tutors if tutor["enabled"]),
+            "superadmins": sum(1 for tutor in tutors if tutor["role"] == "superadmin"),
+            "projects": sum(tutor["project_count"] for tutor in tutors),
+        }
+    return TEMPLATES.TemplateResponse(
+        request,
+        "tutors.html",
+        _base_context(
+            request,
+            page_title="Tutors",
+            tutors=tutors,
+            tutor_stats=stats,
+        ),
+    )
+
+
+@app.post("/dashboard/tutors", dependencies=[Depends(require_admin_session)], include_in_schema=False)
+def dashboard_create_tutor(
+    request: Request,
+    email: Annotated[str, Form()],
+    display_name: Annotated[str | None, Form()] = None,
+    role: Annotated[str, Form()] = "tutor",
+):
+    _require_superadmin_dashboard(request)
+    try:
+        normalized_email = normalize_tutor_email(email)
+    except ValueError as exc:
+        return _redirect("/dashboard/tutors", str(exc), "error")
+
+    name = display_name.strip() if display_name and display_name.strip() else None
+    if name is not None and len(name) > 80:
+        return _redirect("/dashboard/tutors", "Display name may be at most 80 characters", "error")
+    if role not in {"tutor", "superadmin"}:
+        return _redirect("/dashboard/tutors", "Invalid tutor role", "error")
+
+    try:
+        with get_db() as db:
+            cursor = db.execute(
+                """
+                INSERT INTO tutors (email, display_name, role, enabled)
+                VALUES (?, ?, ?, 1)
+                """,
+                (normalized_email, name, role),
+            )
+            tutor_id = cursor.lastrowid
+    except sqlite3.IntegrityError:
+        return _redirect("/dashboard/tutors", "A tutor with that email already exists", "error")
+
+    return _redirect(
+        f"/dashboard/tutors/{tutor_id}",
+        f"Tutor {normalized_email} added",
+        "success",
+    )
+
+
+@app.get("/dashboard/tutors/{tutor_id}", response_class=HTMLResponse, dependencies=[Depends(require_admin_session)], include_in_schema=False)
+def dashboard_tutor_detail(request: Request, tutor_id: int):
+    _require_superadmin_dashboard(request)
+    with get_db() as db:
+        tutor = _tutor_admin_summary(db, tutor_id)
+        project_ids = db.execute(
+            "SELECT id FROM containers WHERE owner_tutor_id = ? ORDER BY id DESC",
+            (tutor_id,),
+        ).fetchall()
+        projects = [_project_summary(db, row["id"]) for row in project_ids]
+    return TEMPLATES.TemplateResponse(
+        request,
+        "tutor_detail.html",
+        _base_context(
+            request,
+            page_title=tutor["display_name"] or tutor["email"],
+            managed_tutor=tutor,
+            projects=projects,
+        ),
+    )
+
+
+@app.post("/dashboard/tutors/{tutor_id}/settings", dependencies=[Depends(require_admin_session)], include_in_schema=False)
+def dashboard_update_tutor(
+    request: Request,
+    tutor_id: int,
+    display_name: Annotated[str | None, Form()] = None,
+    role: Annotated[str, Form()] = "tutor",
+    enabled: Annotated[str | None, Form()] = None,
+):
+    actor = _require_superadmin_dashboard(request)
+    if role not in {"tutor", "superadmin"}:
+        return _redirect(f"/dashboard/tutors/{tutor_id}", "Invalid tutor role", "error")
+
+    name = display_name.strip() if display_name and display_name.strip() else None
+    if name is not None and len(name) > 80:
+        return _redirect(
+            f"/dashboard/tutors/{tutor_id}",
+            "Display name may be at most 80 characters",
+            "error",
+        )
+    new_enabled = _bool_from_form(enabled)
+
+    with get_db() as db:
+        target = get_tutor_by_id(db, tutor_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail="Tutor not found")
+
+        if actor is not None and actor.id == target.id:
+            if not new_enabled:
+                return _redirect(
+                    f"/dashboard/tutors/{tutor_id}",
+                    "You cannot disable your own tutor account",
+                    "error",
+                )
+            if role != "superadmin":
+                return _redirect(
+                    f"/dashboard/tutors/{tutor_id}",
+                    "You cannot demote your own superadmin account",
+                    "error",
+                )
+
+        removes_enabled_superadmin = (
+            target.role == "superadmin"
+            and target.enabled
+            and (role != "superadmin" or not new_enabled)
+        )
+        if removes_enabled_superadmin and count_enabled_superadmins(
+            db, excluding_id=target.id
+        ) == 0:
+            return _redirect(
+                f"/dashboard/tutors/{tutor_id}",
+                "ByteWyrm must keep at least one enabled superadmin",
+                "error",
+            )
+
+        db.execute(
+            """
+            UPDATE tutors
+            SET display_name = ?, role = ?, enabled = ?
+            WHERE id = ?
+            """,
+            (name, role, int(new_enabled), target.id),
+        )
+
+    return _redirect(f"/dashboard/tutors/{tutor_id}", "Tutor settings updated", "success")
+
+
 @app.get("/dashboard/projects/{project_id}", response_class=HTMLResponse, dependencies=[Depends(require_admin_session)], include_in_schema=False)
 def dashboard_project(
     request: Request,
@@ -582,7 +934,9 @@ def dashboard_project(
     store_before_id: Annotated[int | None, Query(gt=0)] = None,
 ):
     with get_db() as db:
-        data = _project_detail_context(db, project_id, store_before_id=store_before_id)
+        data = _project_detail_context(
+            db, project_id, _request_tutor(request), store_before_id=store_before_id
+        )
     return TEMPLATES.TemplateResponse(
         request,
         "project_detail.html",
@@ -597,6 +951,7 @@ def dashboard_project(
 
 @app.post("/dashboard/projects", dependencies=[Depends(require_admin_session)], include_in_schema=False)
 def dashboard_create_project(
+    request: Request,
     name: Annotated[str, Form()],
     store_max_records: Annotated[int, Form()] = 500,
     store_overflow_policy: Annotated[str, Form()] = "reject",
@@ -622,8 +977,8 @@ def dashboard_create_project(
             """
             INSERT INTO containers (
                 public_id, name, max_records, store_overflow_policy, max_request_bytes,
-                read_rate_limit, write_rate_limit
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                read_rate_limit, write_rate_limit, owner_tutor_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 public_id,
@@ -633,6 +988,7 @@ def dashboard_create_project(
                 payload.max_request_bytes,
                 payload.read_rate_limit,
                 payload.write_rate_limit,
+                _owner_tutor_id_for_new_project(db, _request_tutor(request)),
             ),
         )
         _project_summary(db, cursor.lastrowid)
@@ -641,6 +997,7 @@ def dashboard_create_project(
 
 @app.post("/dashboard/projects/{project_id}/settings", dependencies=[Depends(require_admin_session)], include_in_schema=False)
 def dashboard_update_project(
+    request: Request,
     project_id: str,
     name: Annotated[str, Form()],
     store_max_records: Annotated[int, Form()],
@@ -681,7 +1038,7 @@ def dashboard_update_project(
 
     try:
         with get_db() as db:
-            project = _project_or_404(db, project_id)
+            project = _project_or_404(db, project_id, _request_tutor(request))
             record_count = db.execute(
                 "SELECT COUNT(*) AS count FROM records WHERE container_id = ?",
                 (project["id"],),
@@ -728,9 +1085,9 @@ def dashboard_update_project(
 
 
 @app.post("/dashboard/projects/{project_id}/delete", dependencies=[Depends(require_admin_session)], include_in_schema=False)
-def dashboard_delete_project(project_id: str):
+def dashboard_delete_project(request: Request, project_id: str):
     with get_db() as db:
-        project = _project_or_404(db, project_id)
+        project = _project_or_404(db, project_id, _request_tutor(request))
         internal_id = project["id"]
         db.execute("DELETE FROM record_values WHERE container_id = ?", (internal_id,))
         db.execute("DELETE FROM records WHERE container_id = ?", (internal_id,))
@@ -742,6 +1099,7 @@ def dashboard_delete_project(project_id: str):
 
 @app.post("/dashboard/projects/{project_id}/store/fields", dependencies=[Depends(require_admin_session)], include_in_schema=False)
 def dashboard_add_field(
+    request: Request,
     project_id: str,
     name: Annotated[str, Form()],
     field_type: Annotated[str, Form()],
@@ -771,7 +1129,7 @@ def dashboard_add_field(
 
     try:
         with get_db() as db:
-            project = _project_or_404(db, project_id)
+            project = _project_or_404(db, project_id, _request_tutor(request))
             _require_schema_editable(db, project["id"])
             count = db.execute(
                 "SELECT COUNT(*) AS count FROM container_fields WHERE container_id = ?",
@@ -814,10 +1172,10 @@ def dashboard_add_field(
 
 
 @app.post("/dashboard/projects/{project_id}/store/fields/{field_name}/delete", dependencies=[Depends(require_admin_session)], include_in_schema=False)
-def dashboard_remove_field(project_id: str, field_name: str):
+def dashboard_remove_field(request: Request, project_id: str, field_name: str):
     try:
         with get_db() as db:
-            project = _project_or_404(db, project_id)
+            project = _project_or_404(db, project_id, _request_tutor(request))
             _require_schema_editable(db, project["id"])
             field = db.execute(
                 """
@@ -875,7 +1233,7 @@ def dashboard_create_key(
     can_write = "w" in payload.permissions
 
     with get_db() as db:
-        project = _project_or_404(db, project_id)
+        project = _project_or_404(db, project_id, _request_tutor(request))
         cursor = db.execute(
             """
             INSERT INTO api_keys (
@@ -894,7 +1252,7 @@ def dashboard_create_key(
             ),
         )
 
-        data = _project_detail_context(db, project_id)
+        data = _project_detail_context(db, project_id, _request_tutor(request))
 
     return TEMPLATES.TemplateResponse(
         request,
@@ -914,9 +1272,9 @@ def dashboard_create_key(
 
 
 @app.post("/dashboard/projects/{project_id}/keys/{key_id}/revoke", dependencies=[Depends(require_admin_session)], include_in_schema=False)
-def dashboard_revoke_key(project_id: str, key_id: int):
+def dashboard_revoke_key(request: Request, project_id: str, key_id: int):
     with get_db() as db:
-        project = _project_or_404(db, project_id)
+        project = _project_or_404(db, project_id, _request_tutor(request))
         cursor = db.execute(
             "UPDATE api_keys SET enabled = 0 WHERE id = ? AND container_id = ?",
             (key_id, project["id"]),
@@ -927,9 +1285,9 @@ def dashboard_revoke_key(project_id: str, key_id: int):
 
 
 @app.post("/dashboard/projects/{project_id}/keys/{key_id}/enable", dependencies=[Depends(require_admin_session)], include_in_schema=False)
-def dashboard_enable_key(project_id: str, key_id: int):
+def dashboard_enable_key(request: Request, project_id: str, key_id: int):
     with get_db() as db:
-        project = _project_or_404(db, project_id)
+        project = _project_or_404(db, project_id, _request_tutor(request))
         cursor = db.execute(
             "UPDATE api_keys SET enabled = 1 WHERE id = ? AND container_id = ?",
             (key_id, project["id"]),
@@ -954,7 +1312,7 @@ async def dashboard_create_record(request: Request, project_id: str):
 
     try:
         with get_db() as db:
-            project = _project_or_404(db, project_id)
+            project = _project_or_404(db, project_id, _request_tutor(request))
             _writable_key_or_404(db, project["id"], creator_key_id)
             fields = load_container_schema(db, project["id"])
             payload = _record_payload_from_form(form, fields)
@@ -990,7 +1348,7 @@ async def dashboard_create_record(request: Request, project_id: str):
 )
 def dashboard_edit_record_page(request: Request, project_id: str, record_id: int):
     with get_db() as db:
-        project = _project_or_404(db, project_id)
+        project = _project_or_404(db, project_id, _request_tutor(request))
         summary = _project_summary(db, project["id"])
         fields = public_schema(load_container_schema(db, project["id"]))
         record = record_response(db, record_id, project["id"], include_creator=True)
@@ -1017,7 +1375,7 @@ async def dashboard_edit_record(request: Request, project_id: str, record_id: in
     form = await request.form()
     try:
         with get_db() as db:
-            project = _project_or_404(db, project_id)
+            project = _project_or_404(db, project_id, _request_tutor(request))
             existing = db.execute(
                 "SELECT id FROM records WHERE id = ? AND container_id = ?",
                 (record_id, project["id"]),
@@ -1051,9 +1409,9 @@ async def dashboard_edit_record(request: Request, project_id: str, record_id: in
 
 
 @app.post("/dashboard/projects/{project_id}/store/records/{record_id}/delete", dependencies=[Depends(require_admin_session)], include_in_schema=False)
-def dashboard_delete_record(project_id: str, record_id: int):
+def dashboard_delete_record(request: Request, project_id: str, record_id: int):
     with get_db() as db:
-        project = _project_or_404(db, project_id)
+        project = _project_or_404(db, project_id, _request_tutor(request))
         cursor = db.execute(
             "DELETE FROM records WHERE id = ? AND container_id = ?",
             (record_id, project["id"]),
@@ -1064,9 +1422,9 @@ def dashboard_delete_record(project_id: str, record_id: int):
 
 
 @app.post("/dashboard/projects/{project_id}/store/records/clear", dependencies=[Depends(require_admin_session)], include_in_schema=False)
-def dashboard_clear_records(project_id: str):
+def dashboard_clear_records(request: Request, project_id: str):
     with get_db() as db:
-        project = _project_or_404(db, project_id)
+        project = _project_or_404(db, project_id, _request_tutor(request))
         db.execute("DELETE FROM records WHERE container_id = ?", (project["id"],))
     return _redirect(f"/dashboard/projects/{project_id}", "Store cleared; schema unlocked", "success")
 
@@ -1090,15 +1448,15 @@ def health():
 
 
 @app.get("/admin/stats", dependencies=[Depends(require_admin)], tags=["Core"])
-def stats():
+def stats(request: Request):
     with get_db() as db:
-        return _stats_data(db)
+        return _stats_data(db, _request_tutor(request))
 
 
 @app.get("/admin/projects", dependencies=[Depends(require_admin)], tags=["Projects"])
-def list_projects():
+def list_projects(request: Request):
     with get_db() as db:
-        return _list_projects_data(db)
+        return _list_projects_data(db, _request_tutor(request))
 
 
 @app.post(
@@ -1107,7 +1465,7 @@ def list_projects():
     dependencies=[Depends(require_admin)],
     tags=["Projects"],
 )
-def create_project(payload: ProjectCreate):
+def create_project(request: Request, payload: ProjectCreate):
     public_id = _new_project_public_id()
     with get_db() as db:
         cursor = db.execute(
@@ -1119,9 +1477,10 @@ def create_project(payload: ProjectCreate):
                 store_overflow_policy,
                 max_request_bytes,
                 read_rate_limit,
-                write_rate_limit
+                write_rate_limit,
+                owner_tutor_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 public_id,
@@ -1131,28 +1490,29 @@ def create_project(payload: ProjectCreate):
                 payload.max_request_bytes,
                 payload.read_rate_limit,
                 payload.write_rate_limit,
+                _owner_tutor_id_for_new_project(db, _request_tutor(request)),
             ),
         )
         return _project_summary(db, cursor.lastrowid)
 
 
 @app.get("/admin/projects/{project_id}", dependencies=[Depends(require_admin)], tags=["Projects"])
-def get_project(project_id: str):
+def get_project(request: Request, project_id: str):
     with get_db() as db:
-        project = _project_or_404(db, project_id)
+        project = _project_or_404(db, project_id, _request_tutor(request))
         result = _project_summary(db, project["id"])
         result["tools"]["store"]["schema"] = public_schema(load_container_schema(db, project["id"]))
         return result
 
 
 @app.patch("/admin/projects/{project_id}", dependencies=[Depends(require_admin)], tags=["Projects"])
-def update_project(project_id: str, payload: ProjectUpdate):
+def update_project(request: Request, project_id: str, payload: ProjectUpdate):
     updates = payload.model_dump(exclude_none=True)
     if not updates:
         raise HTTPException(status_code=422, detail="No changes supplied")
 
     with get_db() as db:
-        project = _project_or_404(db, project_id)
+        project = _project_or_404(db, project_id, _request_tutor(request))
         record_count = db.execute(
             "SELECT COUNT(*) AS count FROM records WHERE container_id = ?",
             (project["id"],),
@@ -1248,6 +1608,7 @@ def update_project(project_id: str, payload: ProjectUpdate):
     tags=["Projects"],
 )
 def delete_project(
+    request: Request,
     project_id: str,
     confirm: Annotated[bool, Query()] = False,
 ):
@@ -1258,7 +1619,7 @@ def delete_project(
         )
 
     with get_db() as db:
-        project = _project_or_404(db, project_id)
+        project = _project_or_404(db, project_id, _request_tutor(request))
         internal_id = project["id"]
         db.execute("DELETE FROM record_values WHERE container_id = ?", (internal_id,))
         db.execute("DELETE FROM records WHERE container_id = ?", (internal_id,))
@@ -1270,9 +1631,9 @@ def delete_project(
 
 
 @app.get("/admin/projects/{project_id}/store/schema", dependencies=[Depends(require_admin)], tags=["Store"])
-def get_schema(project_id: str):
+def get_schema(request: Request, project_id: str):
     with get_db() as db:
-        project = _project_or_404(db, project_id)
+        project = _project_or_404(db, project_id, _request_tutor(request))
         fields = load_container_schema(db, project["id"])
         return {
             "project_id": project["public_id"],
@@ -1288,9 +1649,9 @@ def get_schema(project_id: str):
     dependencies=[Depends(require_admin)],
     tags=["Store"],
 )
-def add_field(project_id: str, payload: FieldCreate):
+def add_field(request: Request, project_id: str, payload: FieldCreate):
     with get_db() as db:
-        project = _project_or_404(db, project_id)
+        project = _project_or_404(db, project_id, _request_tutor(request))
         _require_schema_editable(db, project["id"])
 
         count = db.execute(
@@ -1344,9 +1705,9 @@ def add_field(project_id: str, payload: FieldCreate):
     dependencies=[Depends(require_admin)],
     tags=["Store"],
 )
-def remove_field(project_id: str, field_name: str):
+def remove_field(request: Request, project_id: str, field_name: str):
     with get_db() as db:
-        project = _project_or_404(db, project_id)
+        project = _project_or_404(db, project_id, _request_tutor(request))
         _require_schema_editable(db, project["id"])
         field = db.execute(
             """
@@ -1385,9 +1746,9 @@ def remove_field(project_id: str, field_name: str):
 
 
 @app.get("/admin/projects/{project_id}/keys", dependencies=[Depends(require_admin)], tags=["Project Keys"])
-def list_keys(project_id: str):
+def list_keys(request: Request, project_id: str):
     with get_db() as db:
-        project = _project_or_404(db, project_id)
+        project = _project_or_404(db, project_id, _request_tutor(request))
         return _list_keys_data(db, project["id"])
 
 
@@ -1396,9 +1757,9 @@ def list_keys(project_id: str):
     dependencies=[Depends(require_admin)],
     tags=["Project Keys"],
 )
-def get_project_usage(project_id: str):
+def get_project_usage(request: Request, project_id: str):
     with get_db() as db:
-        project = _project_or_404(db, project_id)
+        project = _project_or_404(db, project_id, _request_tutor(request))
         return {
             "project_id": project["public_id"],
             "current_minute": project_live_usage(db, project["id"]),
@@ -1412,13 +1773,13 @@ def get_project_usage(project_id: str):
     dependencies=[Depends(require_admin)],
     tags=["Project Keys"],
 )
-def create_key(project_id: str, payload: KeyCreate):
+def create_key(request: Request, project_id: str, payload: KeyCreate):
     api_key = _new_api_key()
     can_read = "r" in payload.permissions
     can_write = "w" in payload.permissions
 
     with get_db() as db:
-        project = _project_or_404(db, project_id)
+        project = _project_or_404(db, project_id, _request_tutor(request))
         cursor = db.execute(
             """
             INSERT INTO api_keys (
@@ -1456,9 +1817,9 @@ def create_key(project_id: str, payload: KeyCreate):
     dependencies=[Depends(require_admin)],
     tags=["Project Keys"],
 )
-def revoke_key(project_id: str, key_id: int):
+def revoke_key(request: Request, project_id: str, key_id: int):
     with get_db() as db:
-        project = _project_or_404(db, project_id)
+        project = _project_or_404(db, project_id, _request_tutor(request))
         cursor = db.execute(
             "UPDATE api_keys SET enabled = 0 WHERE id = ? AND container_id = ?",
             (key_id, project["id"]),
@@ -1473,9 +1834,9 @@ def revoke_key(project_id: str, key_id: int):
     dependencies=[Depends(require_admin)],
     tags=["Project Keys"],
 )
-def enable_key(project_id: str, key_id: int):
+def enable_key(request: Request, project_id: str, key_id: int):
     with get_db() as db:
-        project = _project_or_404(db, project_id)
+        project = _project_or_404(db, project_id, _request_tutor(request))
         cursor = db.execute(
             "UPDATE api_keys SET enabled = 1 WHERE id = ? AND container_id = ?",
             (key_id, project["id"]),
@@ -1492,13 +1853,14 @@ def enable_key(project_id: str, key_id: int):
     tags=["Store"],
 )
 def admin_create_record(
+    request: Request,
     project_id: str,
     record: StoreRecord,
     response: Response,
     creator_key_id: Annotated[int, Query(gt=0)],
 ):
     with get_db() as db:
-        project = _project_or_404(db, project_id)
+        project = _project_or_404(db, project_id, _request_tutor(request))
         _writable_key_or_404(db, project["id"], creator_key_id)
         result, created, changed = write_store_record(
             db,
@@ -1524,9 +1886,9 @@ def admin_create_record(
     dependencies=[Depends(require_admin)],
     tags=["Store"],
 )
-def admin_update_record(project_id: str, record_id: int, record: StoreRecord):
+def admin_update_record(request: Request, project_id: str, record_id: int, record: StoreRecord):
     with get_db() as db:
-        project = _project_or_404(db, project_id)
+        project = _project_or_404(db, project_id, _request_tutor(request))
         existing = db.execute(
             "SELECT id FROM records WHERE id = ? AND container_id = ?",
             (record_id, project["id"]),
@@ -1549,6 +1911,7 @@ def admin_update_record(project_id: str, record_id: int, record: StoreRecord):
     tags=["Store"],
 )
 def list_records(
+    request: Request,
     project_id: str,
     response: Response,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
@@ -1562,7 +1925,7 @@ def list_records(
     cursor: str | None = None,
 ):
     with get_db() as db:
-        project = _project_or_404(db, project_id)
+        project = _project_or_404(db, project_id, _request_tutor(request))
         records, next_before_id, next_cursor, has_more = _list_records_data(
             db,
             project["id"],
@@ -1591,9 +1954,9 @@ def list_records(
     dependencies=[Depends(require_admin)],
     tags=["Store"],
 )
-def delete_record(project_id: str, record_id: int):
+def delete_record(request: Request, project_id: str, record_id: int):
     with get_db() as db:
-        project = _project_or_404(db, project_id)
+        project = _project_or_404(db, project_id, _request_tutor(request))
         cursor = db.execute(
             "DELETE FROM records WHERE id = ? AND container_id = ?",
             (record_id, project["id"]),
@@ -1609,6 +1972,7 @@ def delete_record(project_id: str, record_id: int):
     tags=["Store"],
 )
 def clear_records(
+    request: Request,
     project_id: str,
     confirm: Annotated[bool, Query()] = False,
 ):
@@ -1619,7 +1983,7 @@ def clear_records(
         )
 
     with get_db() as db:
-        project = _project_or_404(db, project_id)
+        project = _project_or_404(db, project_id, _request_tutor(request))
         count = db.execute(
             "SELECT COUNT(*) AS count FROM records WHERE container_id = ?",
             (project["id"],),

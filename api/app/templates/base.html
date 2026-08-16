@@ -199,6 +199,10 @@
         .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
         .nowrap { white-space: nowrap; }
         .page-kicker { color: var(--ember-bright); text-transform: uppercase; letter-spacing: .12em; font-size: .75rem; font-weight: 800; }
+        .identity-chip { display: inline-flex; align-items: center; gap: .45rem; padding: .34rem .62rem; border-radius: 999px; border: 1px solid rgba(217,175,91,.22); background: rgba(217,175,91,.07); color: #d6cdc1; font-size: .82rem; }
+        .identity-chip strong { color: #f2c77c; font-weight: 750; }
+        .identity-dot { color: #72c68a; font-size: .72rem; }
+        .identity-role { color: #b8ad9f; font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; font-weight: 750; }
         @media (max-width: 1000px) {
             .grid-2, .grid-3, .dashboard-main { grid-template-columns: 1fr; }
             .container-card { grid-template-columns: 1fr; }
@@ -219,7 +223,22 @@
                 </div>
             </div>
             <div class="actions">
+                {% if access_identity %}
+                    <span class="identity-chip" title="Verified by Cloudflare Access">
+                        <span class="identity-dot">●</span>
+                        <span>Signed in as</span>
+                        <strong>{{ access_identity.email }}</strong>
+                        {% if current_tutor %}
+                            <span class="identity-role">{{ current_tutor.role }}</span>
+                        {% else %}
+                            <span class="identity-role">unregistered</span>
+                        {% endif %}
+                    </span>
+                {% endif %}
                 <a href="/dashboard">Projects</a>
+                {% if not current_tutor or current_tutor.is_superadmin %}
+                    <a href="/dashboard/tutors">Tutors</a>
+                {% endif %}
                 <a href="/docs">Admin API</a>
                 <form class="inline" method="post" action="/logout">
                     <button class="secondary" type="submit">Sign out</button>

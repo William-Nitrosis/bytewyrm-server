@@ -7,6 +7,7 @@ import sys
 
 from auth import hash_api_key
 from database import create_tables, get_db
+from tutors import get_superadmin
 from schema import FIELD_NAME_PATTERN, FIELD_TYPES, load_container_schema, public_schema
 from store_engine import validate_store_configuration
 from settings import (
@@ -71,6 +72,8 @@ def create_project(args: argparse.Namespace) -> None:
     public_id = new_project_public_id()
 
     with get_db() as db:
+        superadmin = get_superadmin(db)
+        owner_tutor_id = superadmin.id if superadmin is not None else None
         db.execute(
             """
             INSERT INTO containers (
@@ -80,9 +83,10 @@ def create_project(args: argparse.Namespace) -> None:
                 store_overflow_policy,
                 max_request_bytes,
                 read_rate_limit,
-                write_rate_limit
+                write_rate_limit,
+                owner_tutor_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 public_id,
@@ -92,12 +96,16 @@ def create_project(args: argparse.Namespace) -> None:
                 args.max_request_bytes,
                 args.read_rate_limit,
                 args.write_rate_limit,
+                owner_tutor_id,
             ),
         )
 
     print("Project created")
     print(f"  ID:                  {public_id}")
     print(f"  Name:                {args.name}")
+    print(
+        f"  Owner:               {superadmin.email if superadmin is not None else 'unowned (no tutor bootstrapped yet)'}"
+    )
     print(f"  Store max records:   {args.store_max_records}")
     print(f"  Store full policy:   {args.store_overflow_policy}")
     print(f"  Max request bytes:   {args.max_request_bytes}")
@@ -122,12 +130,14 @@ def list_projects(_args: argparse.Namespace) -> None:
                 c.read_rate_limit,
                 c.write_rate_limit,
                 c.created_at,
+                t.email AS owner_email,
                 COUNT(DISTINCT k.id) AS key_count,
                 COUNT(DISTINCT f.id) AS field_count,
                 (SELECT COUNT(*) FROM records r WHERE r.container_id = c.id) AS record_count
             FROM containers c
             LEFT JOIN api_keys k ON k.container_id = c.id
             LEFT JOIN container_fields f ON f.container_id = c.id
+            LEFT JOIN tutors t ON t.id = c.owner_tutor_id
             GROUP BY c.id
             ORDER BY c.id
             """
@@ -147,6 +157,7 @@ def list_projects(_args: argparse.Namespace) -> None:
             f"mode={row['store_record_mode']}  "
             f"reads={row['store_read_scope']}  "
             f"keys={row['key_count']}  "
+            f"owner={row['owner_email'] or 'unowned'}  "
             f"rate=R{row['read_rate_limit']}/W{row['write_rate_limit']} per min"
         )
 
@@ -537,6 +548,30 @@ def revoke_key(args: argparse.Namespace) -> None:
     print(f"Revoked API key id={args.key_id} for {project['public_id']}")
 
 
+def list_tutors(_args: argparse.Namespace) -> None:
+    with get_db() as db:
+        rows = db.execute(
+            """
+            SELECT id, email, display_name, role, enabled, created_at, last_seen_at
+            FROM tutors
+            ORDER BY id
+            """
+        ).fetchall()
+
+    if not rows:
+        print("No tutors exist yet. The first verified Cloudflare Access identity will bootstrap as superadmin.")
+        return
+
+    for row in rows:
+        state = "enabled" if row["enabled"] else "disabled"
+        name = f" ({row['display_name']})" if row["display_name"] else ""
+        last_seen = row["last_seen_at"] or "never"
+        print(
+            f"{row['id']:>3}  {row['email']}{name}  "
+            f"[{row['role']}, {state}]  last_seen={last_seen}"
+        )
+
+
 def set_project_enabled(args: argparse.Namespace, enabled: bool) -> None:
     with get_db() as db:
         project = get_project(db, args.project)
@@ -556,6 +591,12 @@ def build_parser() -> argparse.ArgumentParser:
         description="Local administration tool for ByteWyrm"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    list_tutors_parser = subparsers.add_parser(
+        "list-tutors",
+        help="List registered ByteWyrm tutors (never changes accounts)",
+    )
+    list_tutors_parser.set_defaults(func=list_tutors)
 
     create_container_parser = subparsers.add_parser(
         "create-project",
