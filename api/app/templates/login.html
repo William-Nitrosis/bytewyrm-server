@@ -2,29 +2,17 @@
 {% block content %}
 <div style="max-width: 520px; margin: 3rem auto;">
     <div class="panel">
-        <div class="page-kicker">ByteWyrm</div><h1 style="margin:.15rem 0 .35rem;">Enter the Hoard</h1>
-        {% if access_identity %}
-            <div class="notice success" style="margin-top:.8rem;">
-                Cloudflare Access verified <strong>{{ access_identity.email }}</strong>.
-                {% if current_tutor %}
-                    ByteWyrm knows this account as <strong>{{ current_tutor.role }}</strong>.
-                {% else %}
-                    This identity is not registered as a ByteWyrm tutor yet.
-                {% endif %}
-            </div>
-            <p class="muted">During the multi-tutor rollout, the existing admin token is still required as a second gate.</p>
-        {% else %}
-            <p class="muted">Enter the admin bearer token from your <code>.env</code> file to access the private ByteWyrm dashboard.</p>
-        {% endif %}
+        <div class="page-kicker">Break glass</div><h1 style="margin:.15rem 0 .35rem;">Direct admin access</h1>
+        <p class="muted">This login is only for direct/LAN recovery access when Cloudflare Access is unavailable. Normal tutors sign in through <code>admin.bytewyrm.dev</code> with their approved identity.</p>
         <form class="stacked" method="post" action="/login">
             <input type="hidden" name="next_path" value="{{ next }}">
             <div>
-                <label for="admin_token">Admin token</label>
+                <label for="admin_token">Break-glass admin token</label>
                 <input id="admin_token" name="admin_token" type="password" autocomplete="current-password" required>
             </div>
             <button type="submit">Enter dashboard</button>
         </form>
-        <p class="muted" style="margin-top:1rem;">Tip: docs remain at <code>/docs</code> for the JSON admin API.</p>
+        <p class="muted" style="margin-top:1rem;">Keep this token private. It is not required for normal Cloudflare-authenticated tutor sessions.</p>
     </div>
 </div>
 {% endblock %}

@@ -2,14 +2,20 @@ import secrets
 import sqlite3
 from pathlib import Path
 from typing import Annotated, Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request, Response, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 
-from admin_auth import SESSION_COOKIE_NAME, is_valid_admin_token, require_admin, require_admin_session
+from admin_auth import (
+    SESSION_COOKIE_NAME,
+    has_authorized_access_identity,
+    is_valid_admin_token,
+    require_admin,
+    require_admin_session,
+)
 from cloudflare_access import (
     CloudflareAccessInvalidToken,
     CloudflareAccessNotConfigured,
@@ -40,7 +46,7 @@ from tutors import (
 )
 
 
-APP_VERSION = "0.11.2"
+APP_VERSION = "0.12.0"
 ADMIN_MAX_REQUEST_SIZE = 16 * 1024
 PROJECT_ID_PREFIX = "prj_"
 API_KEY_PREFIX = "bwk_"
@@ -644,6 +650,22 @@ async def resolve_cloudflare_access_identity(request: Request, call_next):
                 request.state.bytewyrm_tutor = resolve_tutor_for_access_identity(
                     db, identity
                 )
+            tutor = request.state.bytewyrm_tutor
+            if tutor is None:
+                return JSONResponse(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    content={
+                        "detail": (
+                            "This Cloudflare account is not registered as a "
+                            "ByteWyrm tutor"
+                        )
+                    },
+                )
+            if not tutor.enabled:
+                return JSONResponse(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    content={"detail": "This ByteWyrm tutor account is disabled"},
+                )
     except CloudflareAccessNotConfigured:
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -660,7 +682,14 @@ async def resolve_cloudflare_access_identity(request: Request, call_next):
             content={"detail": "Invalid Cloudflare Access identity"},
         )
 
-    return await call_next(request)
+    response = await call_next(request)
+
+    # Cloudflare Access is the browser session now. Remove any legacy cookie
+    # containing ADMIN_TOKEN from browsers that used the rollout login screen.
+    if getattr(request.state, "cloudflare_access_identity", None) is not None:
+        response.delete_cookie(SESSION_COOKIE_NAME)
+
+    return response
 
 
 @app.middleware("http")
@@ -690,12 +719,44 @@ async def limit_admin_request_size(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def protect_dashboard_form_origin(request: Request, call_next):
+    """Reject cross-origin state-changing dashboard form submissions.
+
+    Cloudflare Access now provides the normal browser authentication session,
+    so ByteWyrm also checks Origin/Referer on dashboard POSTs as a lightweight
+    CSRF defense. Native same-origin forms continue to work on both HTTPS and
+    the direct LAN break-glass address.
+    """
+    if request.method == "POST" and (
+        request.url.path.startswith("/dashboard/") or request.url.path == "/logout"
+    ):
+        source = request.headers.get("origin") or request.headers.get("referer")
+        if source:
+            try:
+                source_url = urlparse(source)
+            except ValueError:
+                source_url = None
+            request_host = request.headers.get("host", "").lower()
+            source_host = source_url.netloc.lower() if source_url is not None else ""
+            if not request_host or source_host != request_host:
+                return JSONResponse(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    content={"detail": "Cross-origin dashboard request blocked"},
+                )
+
+    return await call_next(request)
+
+
 # -------------------------------
 # Browser dashboard routes
 # -------------------------------
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def index(request: Request):
+    if has_authorized_access_identity(request):
+        return RedirectResponse("/dashboard", status_code=status.HTTP_303_SEE_OTHER)
+
     session = request.cookies.get(SESSION_COOKIE_NAME)
     if is_valid_admin_token(session):
         return RedirectResponse("/dashboard", status_code=status.HTTP_303_SEE_OTHER)
@@ -704,6 +765,10 @@ def index(request: Request):
 
 @app.get("/login", response_class=HTMLResponse, include_in_schema=False)
 def login_page(request: Request):
+    # Cloudflare-authenticated tutors never need the ByteWyrm token prompt.
+    if has_authorized_access_identity(request):
+        return RedirectResponse("/dashboard", status_code=status.HTTP_303_SEE_OTHER)
+
     session = request.cookies.get(SESSION_COOKIE_NAME)
     if is_valid_admin_token(session):
         return RedirectResponse("/dashboard", status_code=status.HTTP_303_SEE_OTHER)
@@ -720,31 +785,22 @@ def login_submit(
     admin_token: Annotated[str, Form()],
     next_path: Annotated[str, Form()] = "/dashboard",
 ):
+    # Defensive: a valid Access identity should never be asked for ADMIN_TOKEN.
+    if has_authorized_access_identity(request):
+        return RedirectResponse("/dashboard", status_code=status.HTTP_303_SEE_OTHER)
+
     if not next_path.startswith("/"):
         next_path = "/dashboard"
 
     if not is_valid_admin_token(admin_token):
         return _redirect(f"/login?next={next_path}", "Invalid admin token", "error")
 
-    identity = getattr(request.state, "cloudflare_access_identity", None)
-    tutor = _request_tutor(request)
-    if identity is not None and tutor is None:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="This Cloudflare account is not registered as a ByteWyrm tutor",
-        )
-    if tutor is not None and not tutor.enabled:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="This ByteWyrm tutor account is disabled",
-        )
-
     response = RedirectResponse(next_path, status_code=status.HTTP_303_SEE_OTHER)
     response.set_cookie(
         SESSION_COOKIE_NAME,
         admin_token,
         httponly=True,
-        samesite="lax",
+        samesite="strict",
         secure=False,
         max_age=60 * 60 * 8,
     )
@@ -752,8 +808,21 @@ def login_submit(
 
 
 @app.post("/logout", include_in_schema=False)
-def logout_submit():
-    response = RedirectResponse("/login?message=Signed+out&level=info", status_code=status.HTTP_303_SEE_OTHER)
+def logout_submit(request: Request):
+    if getattr(request.state, "cloudflare_access_identity", None) is not None:
+        # Cloudflare documents this application-domain endpoint for ending the
+        # current Access session. A 303 makes the browser follow it with GET.
+        response = RedirectResponse(
+            "/cdn-cgi/access/logout",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+        response.delete_cookie(SESSION_COOKIE_NAME)
+        return response
+
+    response = RedirectResponse(
+        "/login?message=Signed+out&level=info",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
     response.delete_cookie(SESSION_COOKIE_NAME)
     return response
 

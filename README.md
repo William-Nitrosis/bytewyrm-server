@@ -399,7 +399,7 @@ The dashboard can:
 
 The admin service uses a separate `ADMIN_TOKEN`. Direct LAN access can remain bound to a trusted interface. A hosted deployment may additionally publish the dashboard through Cloudflare Tunnel **only when the hostname is protected by Cloudflare Access**.
 
-When Cloudflare Access identity support is configured, ByteWyrm validates the signed `Cf-Access-Jwt-Assertion` application token against the Access team's public keys, issuer and application audience before trusting the verified email claim. During the current rollout the existing `ADMIN_TOKEN` remains a second gate.
+When Cloudflare Access identity support is configured, ByteWyrm validates the signed `Cf-Access-Jwt-Assertion` application token against the Access team's public keys, issuer and application audience before trusting the verified email claim. For requests arriving through Cloudflare Access, a verified enabled ByteWyrm tutor identity is now the normal admin authentication. `ADMIN_TOKEN` is retained only for direct/LAN break-glass access and direct LAN admin API calls.
 
 Configure the admin container with:
 
@@ -642,22 +642,21 @@ Future tools may be added alongside Store where they require genuinely different
 
 ## Multi-tutor admin rollout
 
-The hosted admin dashboard can validate human identity from Cloudflare Access.
-ByteWyrm then persists that verified identity in its own `tutors` table so
-future authorization can be based on a local tutor account rather than a
-shared admin secret.
+The hosted admin dashboard validates human identity from Cloudflare Access and
+maps the verified email to ByteWyrm's local `tutors` table. Tutor role and
+Project ownership are then enforced by ByteWyrm itself.
 
-The rollout is intentionally staged. In the current identity-persistence step:
+Current authentication behaviour:
 
 - Cloudflare Access JWTs are cryptographically validated by ByteWyrm.
 - The first verified Access identity on a fresh installation is bootstrapped as
   the ByteWyrm `superadmin`.
 - That bootstrap is one-shot. Once any tutor exists, later unknown Access
-  identities are not automatically created.
-- Existing `ADMIN_TOKEN` browser/API authentication remains in place as a
-  second gate while multi-tutor authorization is being built.
-- Direct LAN access continues to work without a Cloudflare identity and remains
-  the break-glass path.
+  identities are not automatically created and receive `403`.
+- Enabled Cloudflare-authenticated tutors do not enter or share `ADMIN_TOKEN`.
+- `ADMIN_TOKEN` is retained only for direct/LAN break-glass dashboard sessions
+  and direct LAN admin API calls.
+- Remote sign-out ends the Cloudflare Access session.
 
 Registered tutors can be inspected without modifying them:
 
@@ -717,3 +716,37 @@ Adding a tutor to ByteWyrm does not grant access through Cloudflare by itself;
 the identity must still satisfy the Cloudflare Access policy protecting the
 admin hostname.
 
+
+
+## v0.12 admin authentication
+
+The hosted admin dashboard now uses Cloudflare Access as the normal browser
+authentication layer. ByteWyrm validates the signed Access application JWT, maps
+the verified email to an enabled tutor row, and then applies tutor/superadmin
+authorization. No shared ByteWyrm admin token is entered by normal tutors.
+
+```text
+Google / configured IdP
+        ↓
+Cloudflare Access
+        ↓
+verified Cf-Access-Jwt-Assertion
+        ↓
+ByteWyrm tutor account
+        ↓
+Project authorization
+```
+
+`ADMIN_TOKEN` is deliberately retained for direct trusted-LAN break-glass access.
+The `/login` page is therefore only used when the request has no Cloudflare
+Access identity. Remote users are redirected directly to the dashboard after
+Access authenticates them.
+
+The admin JSON API follows the same rule: a verified enabled Access tutor does
+not need the bearer admin token, while direct LAN API calls still require
+`Authorization: Bearer <ADMIN_TOKEN>`.
+
+Remote dashboard sign-out redirects to the application-domain Cloudflare Access
+logout endpoint. ByteWyrm also deletes any legacy `bytewyrm_admin_session` cookie
+from Cloudflare-authenticated browsers so the old shared token is not retained
+client-side after upgrading.

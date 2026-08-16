@@ -27,16 +27,15 @@ def is_valid_admin_token(token: str | None) -> bool:
     return secrets.compare_digest(token, configured)
 
 
-def _require_registered_access_tutor(request: Request) -> None:
-    """Reject public Access identities that ByteWyrm does not authorize.
+def has_authorized_access_identity(request: Request) -> bool:
+    """Return True for a verified, enabled ByteWyrm tutor Access identity.
 
-    A request with no Cloudflare identity is direct/LAN break-glass access and
-    continues to rely on ADMIN_TOKEN. If Cloudflare identified a human, that
-    identity must map to an enabled ByteWyrm tutor.
+    A request without a Cloudflare Access identity is treated as direct/LAN
+    break-glass access and must authenticate with ADMIN_TOKEN instead.
     """
     identity = getattr(request.state, "cloudflare_access_identity", None)
     if identity is None:
-        return
+        return False
 
     tutor = getattr(request.state, "bytewyrm_tutor", None)
     if tutor is None:
@@ -49,6 +48,7 @@ def _require_registered_access_tutor(request: Request) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="This ByteWyrm tutor account is disabled",
         )
+    return True
 
 
 def require_admin(
@@ -58,6 +58,10 @@ def require_admin(
         Depends(security),
     ],
 ) -> None:
+    """Authorize admin API calls through Access or the LAN break-glass token."""
+    if has_authorized_access_identity(request):
+        return
+
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -72,15 +76,16 @@ def require_admin(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    _require_registered_access_tutor(request)
-
 
 def require_admin_session(
     request: Request,
     session_token: Annotated[str | None, Cookie(alias=SESSION_COOKIE_NAME)] = None,
 ) -> None:
+    """Authorize dashboard requests through Access or the LAN break-glass cookie."""
+    if has_authorized_access_identity(request):
+        return
+
     if is_valid_admin_token(session_token):
-        _require_registered_access_tutor(request)
         return
 
     raise HTTPException(
