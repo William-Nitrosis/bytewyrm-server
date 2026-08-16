@@ -37,6 +37,7 @@ services:
       - /srv/data/bytewyrm/database:/data/database
     networks:
       - admin_net
+      - admin_tunnel
 
 
   homepage:
@@ -70,10 +71,12 @@ services:
 
     networks:
       - public_api
+      - admin_tunnel
       - homepage_net
 
 
 networks:
   public_api:
   admin_net:
+  admin_tunnel:
   homepage_net:
